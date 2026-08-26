@@ -19,8 +19,11 @@ metadata:
     {{- include "procscan.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "update"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
 {{- end }}
 
 {{- if .Values.rbac.create }}

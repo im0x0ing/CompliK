@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,39 +33,11 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-type compiledRules struct {
-	blacklistProcesses  []*regexp.Regexp
-	blacklistKeywords   []*regexp.Regexp
-	whitelistProcesses  []*regexp.Regexp
-	whitelistCommands   []*regexp.Regexp
-	whitelistNamespaces []*regexp.Regexp
-	whitelistPodNames   []*regexp.Regexp
-}
-
 type Processor struct {
 	ProcPath string
-	rules    compiledRules
 	matcher  *procscanrules.Matcher
 	revision uint64
 	mu       sync.RWMutex
-}
-
-// compileRules compiles a list of regex patterns into compiled regular expressions
-func compileRules(patterns []string) []*regexp.Regexp {
-	regexps := make([]*regexp.Regexp, 0, len(patterns))
-	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			legacy.L.WithFields(logrus.Fields{"rule": pattern}).
-				WithError(err).
-				Warn("Invalid regex pattern, skipping")
-			continue
-		}
-
-		regexps = append(regexps, re)
-	}
-
-	return regexps
 }
 
 // NewProcessor creates a new processor instance with the given configuration
@@ -86,26 +57,9 @@ func (p *Processor) UpdateConfig(config *models.Config) error {
 		}
 		matcher = compiled
 	}
-	rules := config.DetectionRules
-	legacyRules := compiledRules{
-		blacklistProcesses:  compileRules(rules.Blacklist.Processes),
-		blacklistKeywords:   compileRules(rules.Blacklist.Keywords),
-		whitelistProcesses:  compileRules(rules.Whitelist.Processes),
-		whitelistCommands:   compileRules(rules.Whitelist.Commands),
-		whitelistNamespaces: compileRules(rules.Whitelist.Namespaces),
-		whitelistPodNames:   compileRules(rules.Whitelist.PodNames),
-	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.rules = compiledRules{
-		blacklistProcesses:  legacyRules.blacklistProcesses,
-		blacklistKeywords:   legacyRules.blacklistKeywords,
-		whitelistProcesses:  legacyRules.whitelistProcesses,
-		whitelistCommands:   legacyRules.whitelistCommands,
-		whitelistNamespaces: legacyRules.whitelistNamespaces,
-		whitelistPodNames:   legacyRules.whitelistPodNames,
-	}
 	p.matcher = matcher
 	p.revision = config.ProcscanRules.RulesetRevision
 	return nil
@@ -147,20 +101,7 @@ func (p *Processor) GetAllProcesses() ([]int, error) {
 	return pids, nil
 }
 
-// matchAny checks if text matches any of the provided regular expressions
-// Returns true and the matching pattern if found, false and empty string otherwise
-func matchAny(text string, regexps []*regexp.Regexp) (bool, string) {
-	for _, re := range regexps {
-		if re.MatchString(text) {
-			return true, re.String()
-		}
-	}
-
-	return false, ""
-}
-
-// AnalyzeProcess returns process info for blacklist hits after whitelist checks.
-// This function queries container info on-demand instead of using cache
+// AnalyzeProcess returns process info for structured rule hits after exemption checks.
 func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 	procDir := filepath.Join(p.ProcPath, strconv.Itoa(pid))
 	cmdlineFile := filepath.Join(procDir, "cmdline")
@@ -192,25 +133,13 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 		ProcessName: processName,
 		Command:     cmdline,
 	})
-	message := ""
-	if structured {
-		if matchResult == nil {
+	if !structured || matchResult == nil {
+		if structured {
 			procLogger.Debug("Process did not match an enabled rule or was exempted")
-			return nil, nil
 		}
-		message = fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
-	} else {
-		isBlacklisted, legacyMessage := p.isBlacklisted(processName, cmdline)
-		if !isBlacklisted {
-			procLogger.Debug("Process not in blacklist, skipping")
-			return nil, nil
-		}
-		message = legacyMessage
-		if p.isProcessWhitelisted(processName, cmdline) {
-			procLogger.Info("Process matched whitelist")
-			return nil, nil
-		}
+		return nil, nil
 	}
+	message := fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
 
 	procLogger.WithField("reason", message).Info("Process matched detection rule")
 
@@ -276,22 +205,17 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 		}
 	}
 
-	if structured {
-		matchResult, revision, _ = p.matchStructured(procscanrules.Sample{
-			ProcessName: processName,
-			Command:     cmdline,
-			Namespace:   namespace,
-			PodName:     podName,
-		})
-		if matchResult == nil {
-			procLogger.Info("Process or infrastructure matched an exemption")
-			return nil, nil
-		}
-		message = fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
-	} else if (namespace != "" || podName != "") && p.isInfraWhitelisted(namespace, podName) {
-		procLogger.Info("Infrastructure matched whitelist")
+	matchResult, revision, _ = p.matchStructured(procscanrules.Sample{
+		ProcessName: processName,
+		Command:     cmdline,
+		Namespace:   namespace,
+		PodName:     podName,
+	})
+	if matchResult == nil {
+		procLogger.Info("Process or infrastructure matched an exemption")
 		return nil, nil
 	}
+	message = fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
 
 	processInfo := &models.ProcessInfo{
 		PID:               pid,
@@ -359,49 +283,6 @@ func (p *Processor) matchStructured(sample procscanrules.Sample) (*procscanrules
 		return nil, 0, false
 	}
 	return p.matcher.Match(sample), p.revision, true
-}
-
-// isBlacklisted checks if a process name or command line matches blacklist rules
-func (p *Processor) isBlacklisted(processName, cmdline string) (bool, string) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if matched, rule := matchAny(processName, p.rules.blacklistProcesses); matched {
-		return true, fmt.Sprintf("进程名 '%s' 命中黑名单规则 '%s'", processName, rule)
-	}
-
-	if matched, rule := matchAny(cmdline, p.rules.blacklistKeywords); matched {
-		return true, fmt.Sprintf("命令行命中关键词黑名单规则 '%s'", rule)
-	}
-
-	return false, ""
-}
-
-// isProcessWhitelisted checks if a process is whitelisted by name or command
-func (p *Processor) isProcessWhitelisted(processName, cmdline string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return matchAnyBool(processName, p.rules.whitelistProcesses) ||
-		matchAnyBool(cmdline, p.rules.whitelistCommands)
-}
-
-// isInfraWhitelisted checks if namespace or pod name is whitelisted
-func (p *Processor) isInfraWhitelisted(namespace, podName string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return matchAnyBool(namespace, p.rules.whitelistNamespaces) ||
-		matchAnyBool(podName, p.rules.whitelistPodNames)
-}
-
-// matchAnyBool is a simplified version of matchAny that only returns a boolean
-func matchAnyBool(text string, regexps []*regexp.Regexp) bool {
-	for _, re := range regexps {
-		if re.MatchString(text) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // getProcessName extracts the process name from command line

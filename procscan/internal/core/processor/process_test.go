@@ -17,7 +17,6 @@ package processor
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
 
 	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
@@ -28,6 +27,18 @@ import (
 func TestProcessor(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "Processor Suite")
+}
+
+func minerRuleSet(revision uint64) models.ProcscanRuleSet {
+	return models.ProcscanRuleSet{
+		SchemaVersion:   2,
+		RulesetRevision: revision,
+		Rules: []models.ProcscanRule{{
+			ID: "miner", Name: "miner", Enabled: true,
+			MatchType: "process_name", Pattern: "^xmrig$",
+			Severity: "critical", Action: "ban",
+		}},
+	}
 }
 
 func TestGetProcessStartTime(t *testing.T) {
@@ -50,245 +61,32 @@ func TestGetProcessStartTime(t *testing.T) {
 }
 
 var _ = Describe("Processor", func() {
-	Describe("compileRules", func() {
-		It("should compile valid regex patterns", func() {
-			patterns := []string{"test.*", "^abc$", ".*xyz"}
-			regexps := compileRules(patterns)
-			Expect(regexps).To(HaveLen(3))
-			Expect(regexps[0].String()).To(Equal("test.*"))
-		})
-
-		It("should skip invalid regex patterns", func() {
-			patterns := []string{"valid.*", "[invalid", "also_valid"}
-			regexps := compileRules(patterns)
-			Expect(regexps).To(HaveLen(2))
-			Expect(regexps[0].String()).To(Equal("valid.*"))
-			Expect(regexps[1].String()).To(Equal("also_valid"))
-		})
-
-		It("should handle empty pattern list", func() {
-			patterns := []string{}
-			regexps := compileRules(patterns)
-			Expect(regexps).To(BeEmpty())
-		})
-	})
-
-	Describe("matchAny", func() {
-		var regexps []*regexp.Regexp
-
-		BeforeEach(func() {
-			regexps = []*regexp.Regexp{
-				regexp.MustCompile("^miner.*"),
-				regexp.MustCompile(".*crypto.*"),
-				regexp.MustCompile("xmrig"),
-			}
-		})
-
-		It("should match when pattern matches", func() {
-			matched, rule := matchAny("minerd", regexps)
-			Expect(matched).To(BeTrue())
-			Expect(rule).To(Equal("^miner.*"))
-		})
-
-		It("should match keyword in the middle", func() {
-			matched, rule := matchAny("some-crypto-tool", regexps)
-			Expect(matched).To(BeTrue())
-			Expect(rule).To(Equal(".*crypto.*"))
-		})
-
-		It("should not match when no patterns match", func() {
-			matched, rule := matchAny("safe_process", regexps)
-			Expect(matched).To(BeFalse())
-			Expect(rule).To(BeEmpty())
-		})
-
-		It("should handle empty regex list", func() {
-			matched, rule := matchAny("anything", []*regexp.Regexp{})
-			Expect(matched).To(BeFalse())
-			Expect(rule).To(BeEmpty())
-		})
-	})
-
-	Describe("matchAnyBool", func() {
-		var regexps []*regexp.Regexp
-
-		BeforeEach(func() {
-			regexps = []*regexp.Regexp{
-				regexp.MustCompile("^kube-system$"),
-				regexp.MustCompile("^monitoring$"),
-			}
-		})
-
-		It("should return true when pattern matches", func() {
-			Expect(matchAnyBool("kube-system", regexps)).To(BeTrue())
-		})
-
-		It("should return false when no pattern matches", func() {
-			Expect(matchAnyBool("ns-user", regexps)).To(BeFalse())
-		})
-	})
-
 	Describe("NewProcessor", func() {
-		It("should create a new processor with config", func() {
+		It("should create a new processor with structured rules", func() {
 			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-				DetectionRules: models.DetectionRules{
-					Blacklist: models.RuleSet{
-						Processes: []string{"minerd", "xmrig"},
-					},
-					Whitelist: models.RuleSet{
-						Namespaces: []string{"kube-system"},
-					},
-				},
+				Scanner:       models.ScannerConfig{ProcPath: "/proc"},
+				ProcscanRules: minerRuleSet(1),
 			}
 
 			processor := NewProcessor(config)
 			Expect(processor).NotTo(BeNil())
 			Expect(processor.ProcPath).To(Equal("/proc"))
-			Expect(processor.rules.blacklistProcesses).To(HaveLen(2))
-			Expect(processor.rules.whitelistNamespaces).To(HaveLen(1))
+			Expect(processor.Ready()).To(BeTrue())
+			Expect(processor.RulesetRevision()).To(Equal(uint64(1)))
 		})
 	})
 
 	Describe("UpdateConfig", func() {
-		var processor *Processor
+		It("should compile structured rules from new config", func() {
+			processor := NewProcessor(&models.Config{
+				Scanner: models.ScannerConfig{ProcPath: "/proc"},
+			})
+			Expect(processor.Ready()).To(BeFalse())
 
-		BeforeEach(func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-			}
-			processor = NewProcessor(config)
-		})
-
-		It("should update rules from new config", func() {
-			newConfig := &models.Config{
-				DetectionRules: models.DetectionRules{
-					Blacklist: models.RuleSet{
-						Processes: []string{"new_miner", "new_crypto"},
-						Keywords:  []string{"stratum.*"},
-					},
-					Whitelist: models.RuleSet{
-						Processes:  []string{"safe_app"},
-						Namespaces: []string{"kube-.*"},
-					},
-				},
-			}
-
-			processor.UpdateConfig(newConfig)
-
-			Expect(processor.rules.blacklistProcesses).To(HaveLen(2))
-			Expect(processor.rules.blacklistKeywords).To(HaveLen(1))
-			Expect(processor.rules.whitelistProcesses).To(HaveLen(1))
-			Expect(processor.rules.whitelistNamespaces).To(HaveLen(1))
-		})
-	})
-
-	Describe("isBlacklisted", func() {
-		var processor *Processor
-
-		BeforeEach(func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-				DetectionRules: models.DetectionRules{
-					Blacklist: models.RuleSet{
-						Processes: []string{"^minerd$", "xmrig"},
-						Keywords:  []string{"stratum\\+tcp://", "--donate-level"},
-					},
-				},
-			}
-			processor = NewProcessor(config)
-		})
-
-		It("should detect blacklisted process name", func() {
-			matched, message := processor.isBlacklisted("minerd", "/usr/bin/minerd -o pool")
-			Expect(matched).To(BeTrue())
-			Expect(message).To(ContainSubstring("minerd"))
-			Expect(message).To(ContainSubstring("命中黑名单规则"))
-		})
-
-		It("should detect blacklisted keyword in command", func() {
-			matched, message := processor.isBlacklisted(
-				"worker",
-				"/app/worker stratum+tcp://pool.com:3333",
-			)
-			Expect(matched).To(BeTrue())
-			Expect(message).To(ContainSubstring("命中关键词黑名单规则"))
-		})
-
-		It("should not match safe process", func() {
-			matched, message := processor.isBlacklisted("nginx", "/usr/sbin/nginx -g daemon off;")
-			Expect(matched).To(BeFalse())
-			Expect(message).To(BeEmpty())
-		})
-	})
-
-	Describe("isProcessWhitelisted", func() {
-		var processor *Processor
-
-		BeforeEach(func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-				DetectionRules: models.DetectionRules{
-					Whitelist: models.RuleSet{
-						Processes: []string{"python3", "node"},
-						Commands:  []string{".*pytest.*", ".*npm test.*"},
-					},
-				},
-			}
-			processor = NewProcessor(config)
-		})
-
-		It("should whitelist by process name", func() {
-			Expect(
-				processor.isProcessWhitelisted("python3", "/usr/bin/python3 app.py"),
-			).To(BeTrue())
-		})
-
-		It("should whitelist by command pattern", func() {
-			Expect(processor.isProcessWhitelisted("py.test", "/usr/bin/pytest tests/")).To(BeTrue())
-		})
-
-		It("should not whitelist non-matching process", func() {
-			Expect(processor.isProcessWhitelisted("unknown", "/bin/unknown --flag")).To(BeFalse())
-		})
-	})
-
-	Describe("isInfraWhitelisted", func() {
-		var processor *Processor
-
-		BeforeEach(func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-				DetectionRules: models.DetectionRules{
-					Whitelist: models.RuleSet{
-						Namespaces: []string{"^kube-system$", "^kube-public$", "^monitoring$"},
-						PodNames:   []string{".*-operator-.*", ".*-controller-.*"},
-					},
-				},
-			}
-			processor = NewProcessor(config)
-		})
-
-		It("should whitelist system namespace", func() {
-			Expect(processor.isInfraWhitelisted("kube-system", "coredns-abc")).To(BeTrue())
-		})
-
-		It("should whitelist by pod name pattern", func() {
-			Expect(processor.isInfraWhitelisted("default", "nginx-operator-123")).To(BeTrue())
-		})
-
-		It("should not whitelist user namespace and pod", func() {
-			Expect(processor.isInfraWhitelisted("ns-user123", "app-deployment-abc")).To(BeFalse())
+			err := processor.UpdateConfig(&models.Config{ProcscanRules: minerRuleSet(3)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(processor.Ready()).To(BeTrue())
+			Expect(processor.RulesetRevision()).To(Equal(uint64(3)))
 		})
 	})
 
@@ -296,32 +94,25 @@ var _ = Describe("Processor", func() {
 		var processor *Processor
 
 		BeforeEach(func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: "/proc",
-				},
-			}
-			processor = NewProcessor(config)
+			processor = NewProcessor(&models.Config{
+				Scanner: models.ScannerConfig{ProcPath: "/proc"},
+			})
 		})
 
 		It("should extract process name from simple command", func() {
-			cmdline := "/usr/bin/python3 script.py"
-			Expect(processor.getProcessName(cmdline)).To(Equal("python3"))
+			Expect(processor.getProcessName("/usr/bin/python3 script.py")).To(Equal("python3"))
 		})
 
 		It("should extract process name from complex path", func() {
-			cmdline := "/usr/local/bin/some-app --flag=value"
-			Expect(processor.getProcessName(cmdline)).To(Equal("some-app"))
+			Expect(processor.getProcessName("/usr/local/bin/some-app --flag=value")).To(Equal("some-app"))
 		})
 
 		It("should handle command with no arguments", func() {
-			cmdline := "nginx"
-			Expect(processor.getProcessName(cmdline)).To(Equal("nginx"))
+			Expect(processor.getProcessName("nginx")).To(Equal("nginx"))
 		})
 
 		It("should handle empty command", func() {
-			cmdline := ""
-			Expect(processor.getProcessName(cmdline)).To(BeEmpty())
+			Expect(processor.getProcessName("")).To(BeEmpty())
 		})
 	})
 
@@ -353,16 +144,11 @@ var _ = Describe("Processor", func() {
 
 		BeforeEach(func() {
 			var err error
-
 			tmpDir, err = os.MkdirTemp("", "proc-test-*")
 			Expect(err).NotTo(HaveOccurred())
-
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: tmpDir,
-				},
-			}
-			processor = NewProcessor(config)
+			processor = NewProcessor(&models.Config{
+				Scanner: models.ScannerConfig{ProcPath: tmpDir},
+			})
 		})
 
 		AfterEach(func() {
@@ -370,11 +156,9 @@ var _ = Describe("Processor", func() {
 		})
 
 		It("should return list of PIDs from proc directory", func() {
-			// Create mock process directories
 			mustMkdir(filepath.Join(tmpDir, "1234"))
 			mustMkdir(filepath.Join(tmpDir, "5678"))
 			mustMkdir(filepath.Join(tmpDir, "9999"))
-			// Create non-numeric directory (should be ignored)
 			mustMkdir(filepath.Join(tmpDir, "self"))
 
 			pids, err := processor.GetAllProcesses()
@@ -407,16 +191,11 @@ var _ = Describe("Processor", func() {
 
 		BeforeEach(func() {
 			var err error
-
 			tmpDir, err = os.MkdirTemp("", "proc-test-*")
 			Expect(err).NotTo(HaveOccurred())
-
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ProcPath: tmpDir,
-				},
-			}
-			processor = NewProcessor(config)
+			processor = NewProcessor(&models.Config{
+				Scanner: models.ScannerConfig{ProcPath: tmpDir},
+			})
 		})
 
 		AfterEach(func() {
@@ -424,19 +203,15 @@ var _ = Describe("Processor", func() {
 		})
 
 		It("should extract container ID from cgroup with containerd", func() {
-			// Create mock PID directory
 			pidDir := filepath.Join(tmpDir, "1234")
 			mustMkdir(pidDir)
 
-			// Create mock cgroup file
 			cgroupContent := `12:memory:/kubepods/besteffort/pod123/cri-containerd-aabbccddee112233445566778899aabbccddee112233445566778899aabbccdd.scope
 11:cpu:/kubepods/besteffort/pod123/cri-containerd-aabbccddee112233445566778899aabbccddee112233445566778899aabbccdd.scope`
-			cgroupPath := filepath.Join(pidDir, "cgroup")
-			err := os.WriteFile(cgroupPath, []byte(cgroupContent), 0o600)
+			err := os.WriteFile(filepath.Join(pidDir, "cgroup"), []byte(cgroupContent), 0o600)
 			Expect(err).NotTo(HaveOccurred())
 
 			containerID := processor.getContainerIDFromPID(1234)
-
 			Expect(containerID).To(Equal(
 				"aabbccddee112233445566778899aabbccddee112233445566778899aabbccdd",
 			))
@@ -444,17 +219,12 @@ var _ = Describe("Processor", func() {
 		})
 
 		It("should return empty string when cgroup file doesn't exist", func() {
-			containerID := processor.getContainerIDFromPID(99999)
-			Expect(containerID).To(BeEmpty())
+			Expect(processor.getContainerIDFromPID(99999)).To(BeEmpty())
 		})
 
 		It("should return empty string for non-container process", func() {
-			// Create mock cgroup without container info
-			pidDir := filepath.Join(tmpDir, "5678")
-			mustMkdir(pidDir)
-
-			containerID := processor.getContainerIDFromPID(5678)
-			Expect(containerID).To(BeEmpty())
+			mustMkdir(filepath.Join(tmpDir, "5678"))
+			Expect(processor.getContainerIDFromPID(5678)).To(BeEmpty())
 		})
 	})
 })

@@ -11,7 +11,7 @@ namespace: sealos
 serviceAccount:
   create: true
   name: process-scanner
-  automountServiceAccountToken: true
+  automountServiceAccountToken: false
 
 # RBAC configuration
 rbac:
@@ -71,13 +71,9 @@ config:
   scanner:
     proc_path: "/host/proc"
     scan_interval: "100s"
+    rules_refresh_interval: "30s"
+    health_port: 8081
     log_level: "info"
-
-  actions:
-    label:
-      enabled: false
-      data:
-        block.sealos.io/locked: "true"
 
   notifications:
     admin:
@@ -91,6 +87,11 @@ config:
           secretName: sealos-complik-admin-auth
           usernameKey: username
           passwordKey: password
+
+  metrics:
+    enabled: false
+    port: 8080
+    path: "/metrics"
 
 volumes:
   proc:

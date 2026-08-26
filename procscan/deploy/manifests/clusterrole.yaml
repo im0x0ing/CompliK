@@ -5,5 +5,8 @@ metadata:
   name: block-procscan
 rules:
   - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]

@@ -10,13 +10,9 @@ data:
     scanner:
       proc_path: {{ .Values.config.scanner.proc_path | quote }}
       scan_interval: {{ .Values.config.scanner.scan_interval | quote }}
+      rules_refresh_interval: {{ .Values.config.scanner.rules_refresh_interval | quote }}
+      health_port: {{ .Values.config.scanner.health_port }}
       log_level: {{ .Values.config.scanner.log_level | quote }}
-
-    actions:
-      label:
-        enabled: {{ .Values.config.actions.label.enabled }}
-        data:
-          {{- toYaml .Values.config.actions.label.data | nindent 10 }}
 
     notifications:
       admin:
@@ -25,3 +21,8 @@ data:
         basic_auth:
           username: {{ .Values.config.notifications.admin.basic_auth.username | quote }}
           password: {{ .Values.config.notifications.admin.basic_auth.password | quote }}
+
+    metrics:
+      enabled: {{ .Values.config.metrics.enabled }}
+      port: {{ .Values.config.metrics.port }}
+      path: {{ .Values.config.metrics.path | quote }}
