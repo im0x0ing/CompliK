@@ -3,8 +3,9 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,19 +24,28 @@ const (
 )
 
 type procscanViolationRequest struct {
-	Namespace      string    `json:"namespace"`
-	PodName        string    `json:"pod_name,omitempty"`
-	ContainerID    string    `json:"container_id,omitempty"`
-	NodeName       string    `json:"node_name,omitempty"`
-	PID            int       `json:"pid"`
-	ProcessName    string    `json:"process_name"`
-	ProcessCommand string    `json:"process_command"`
-	MatchType      string    `json:"match_type,omitempty"`
-	MatchRule      string    `json:"match_rule,omitempty"`
-	Message        string    `json:"message"`
-	IsIllegal      bool      `json:"is_illegal"`
-	DetectedAt     time.Time `json:"detected_at"`
-	RawPayload     any       `json:"raw_payload,omitempty"`
+	EventID           string    `json:"event_id"`
+	Namespace         *string   `json:"namespace"`
+	PodName           string    `json:"pod_name,omitempty"`
+	PodUID            string    `json:"pod_uid,omitempty"`
+	ContainerID       string    `json:"container_id,omitempty"`
+	NodeName          string    `json:"node_name,omitempty"`
+	PID               int       `json:"pid"`
+	ProcessName       string    `json:"process_name"`
+	ProcessCommand    string    `json:"process_command"`
+	MatchType         string    `json:"match_type,omitempty"`
+	MatchRule         string    `json:"match_rule,omitempty"`
+	RulesetRevision   uint64    `json:"ruleset_revision,omitempty"`
+	PrimaryRuleID     string    `json:"primary_rule_id,omitempty"`
+	MatchedRuleIDs    []string  `json:"matched_rule_ids,omitempty"`
+	Severity          string    `json:"severity,omitempty"`
+	RuleAction        string    `json:"rule_action,omitempty"`
+	AttributionStatus string    `json:"attribution_status"`
+	AttributionReason string    `json:"attribution_reason,omitempty"`
+	Message           string    `json:"message"`
+	IsIllegal         bool      `json:"is_illegal"`
+	DetectedAt        time.Time `json:"detected_at"`
+	RawPayload        any       `json:"raw_payload,omitempty"`
 }
 
 func (s *Scanner) reportProcscanViolations(processInfos []*models.ProcessInfo) {
@@ -62,12 +72,6 @@ func (s *Scanner) reportProcscanViolations(processInfos []*models.ProcessInfo) {
 }
 
 func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.ProcessInfo) error {
-	if strings.TrimSpace(processInfo.Namespace) == "" {
-		return errors.New("namespace is required")
-	}
-
-	matchType, matchRule := parseMatchDetails(processInfo.Message)
-
 	detectedAt, err := time.Parse(time.RFC3339, processInfo.Timestamp)
 	if err != nil {
 		detectedAt = time.Now().UTC()
@@ -77,28 +81,41 @@ func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.P
 	localizedMessage := localizeProcscanMessage(
 		processInfo.Message,
 		processInfo.ProcessName,
-		matchType,
-		matchRule,
+		processInfo.MatchType,
+		processInfo.MatchRule,
 	)
+	var namespace *string
+	if value := strings.TrimSpace(processInfo.Namespace); value != "" {
+		namespace = &value
+	}
 
 	payload := procscanViolationRequest{
-		Namespace:      processInfo.Namespace,
-		PodName:        processInfo.PodName,
-		ContainerID:    processInfo.ContainerID,
-		NodeName:       nodeName,
-		PID:            processInfo.PID,
-		ProcessName:    processInfo.ProcessName,
-		ProcessCommand: processInfo.Command,
-		MatchType:      matchType,
-		MatchRule:      matchRule,
-		Message:        localizedMessage,
-		IsIllegal:      processInfo.IsIllegal,
-		DetectedAt:     detectedAt,
+		EventID:           procscanEventID(processInfo, nodeName, detectedAt),
+		Namespace:         namespace,
+		PodName:           processInfo.PodName,
+		PodUID:            processInfo.PodUID,
+		ContainerID:       processInfo.ContainerID,
+		NodeName:          nodeName,
+		PID:               processInfo.PID,
+		ProcessName:       processInfo.ProcessName,
+		ProcessCommand:    processInfo.Command,
+		MatchType:         processInfo.MatchType,
+		MatchRule:         processInfo.MatchRule,
+		RulesetRevision:   processInfo.RulesetRevision,
+		PrimaryRuleID:     processInfo.PrimaryRuleID,
+		MatchedRuleIDs:    append([]string{}, processInfo.MatchedRuleIDs...),
+		Severity:          processInfo.Severity,
+		RuleAction:        processInfo.RuleAction,
+		AttributionStatus: processInfo.AttributionStatus,
+		AttributionReason: processInfo.AttributionReason,
+		Message:           localizedMessage,
+		IsIllegal:         processInfo.IsIllegal,
+		DetectedAt:        detectedAt,
 		RawPayload: buildProcscanRawPayload(
 			processInfo,
 			nodeName,
-			matchType,
-			matchRule,
+			processInfo.MatchType,
+			processInfo.MatchRule,
 			localizedMessage,
 			detectedAt,
 		),
@@ -108,6 +125,26 @@ func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.P
 	defer cancel()
 
 	return postJSON(ctx, endpoint, payload, s.adminBasicAuth())
+}
+
+func procscanEventID(processInfo *models.ProcessInfo, nodeName string, detectedAt time.Time) string {
+	fingerprint := strings.Join([]string{
+		strings.TrimSpace(processInfo.Namespace),
+		strings.TrimSpace(processInfo.PodName),
+		strings.TrimSpace(processInfo.PodUID),
+		strings.TrimSpace(processInfo.ContainerID),
+		strings.TrimSpace(nodeName),
+		fmt.Sprintf("%d", processInfo.PID),
+		strings.TrimSpace(processInfo.ProcessStartTime),
+		fmt.Sprintf("%d", processInfo.RulesetRevision),
+		strings.TrimSpace(processInfo.PrimaryRuleID),
+		strings.TrimSpace(processInfo.MatchRule),
+	}, "\x00")
+	if strings.TrimSpace(processInfo.ProcessStartTime) == "" {
+		fingerprint += "\x00" + detectedAt.UTC().Format(time.RFC3339Nano)
+	}
+	sum := sha256.Sum256([]byte(fingerprint))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Scanner) adminEndpoint() (string, bool) {
@@ -183,41 +220,6 @@ func postJSON(ctx context.Context, endpoint string, payload any, auth adminauth.
 	return nil
 }
 
-func parseMatchDetails(message string) (string, string) {
-	message = strings.TrimSpace(message)
-	if strings.HasPrefix(message, "进程名 '") && strings.Contains(message, "' 命中黑名单规则 '") {
-		parts := strings.SplitN(strings.TrimPrefix(message, "进程名 '"), "' 命中黑名单规则 '", 2)
-		if len(parts) == 2 {
-			return "process_name", strings.TrimSuffix(parts[1], "'")
-		}
-	}
-
-	if after, ok := strings.CutPrefix(message, "命令行命中关键词黑名单规则 '"); ok {
-		return "command_keyword", strings.TrimSuffix(after, "'")
-	}
-
-	if strings.HasPrefix(message, "Process name '") &&
-		strings.Contains(message, "' matched blacklist rule '") {
-		parts := strings.SplitN(
-			strings.TrimPrefix(message, "Process name '"),
-			"' matched blacklist rule '",
-			2,
-		)
-		if len(parts) == 2 {
-			return "process_name", strings.TrimSuffix(parts[1], "'")
-		}
-	}
-
-	if after, ok := strings.CutPrefix(
-		message,
-		"Command line matched keyword blacklist rule '",
-	); ok {
-		return "command_keyword", strings.TrimSuffix(after, "'")
-	}
-
-	return "", ""
-}
-
 func buildProcscanRawPayload(
 	processInfo *models.ProcessInfo,
 	nodeName, matchType, matchRule, message string,
@@ -225,18 +227,19 @@ func buildProcscanRawPayload(
 ) map[string]any {
 	return map[string]any{
 		"进程信息": map[string]any{
-			"进程ID":  processInfo.PID,
-			"进程名称":  localizeUnknown(processInfo.ProcessName),
-			"命令行":   localizeUnknown(processInfo.Command),
-			"命中原因":  message,
-			"Pod名称": localizeUnknown(processInfo.PodName),
-			"命名空间":  localizeUnknown(processInfo.Namespace),
-			"容器ID":  localizeUnknown(processInfo.ContainerID),
-			"节点名称":  localizeUnknown(nodeName),
-			"是否违规":  processInfo.IsIllegal,
-			"检测时间":  detectedAt.Format(time.RFC3339),
-			"匹配类型":  localizeMatchType(matchType),
-			"匹配规则":  localizeUnknown(matchRule),
+			"进程ID":    processInfo.PID,
+			"进程名称":    localizeUnknown(processInfo.ProcessName),
+			"命令行":     localizeUnknown(processInfo.Command),
+			"命中原因":    message,
+			"Pod名称":   localizeUnknown(processInfo.PodName),
+			"命名空间":    localizeUnknown(processInfo.Namespace),
+			"容器ID":    localizeUnknown(processInfo.ContainerID),
+			"Pod UID": localizeUnknown(processInfo.PodUID),
+			"节点名称":    localizeUnknown(nodeName),
+			"是否违规":    processInfo.IsIllegal,
+			"检测时间":    detectedAt.Format(time.RFC3339),
+			"匹配类型":    localizeMatchType(matchType),
+			"匹配规则":    localizeUnknown(matchRule),
 		},
 		"上报来源": "procscan",
 	}

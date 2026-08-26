@@ -15,9 +15,9 @@ ProcScan is a streamlined node security tool that runs as a `DaemonSet` on every
 ### ✨ Key Features
 
 - 🔍 **Process Scanning**: Real-time process monitoring based on `/proc` filesystem
-- 🎯 **Intelligent Detection**: Blacklist and whitelist rule matching
+- 🎯 **Intelligent Detection**: Admin-managed structured rule matching
 - 📢 **Alert Notifications**: Lark (Feishu) Webhook notification integration
-- 🏷️ **Automated Response**: Label-based automated processing
+- 🛡️ **Automated Response**: Submit validated high-risk events to Admin's ban workflow
 - ☸️ **Native Integration**: Fully compatible with Kubernetes ecosystem
 - 📝 **Lightweight Configuration**: Simplified configuration file, easy to deploy and maintain
 
@@ -80,54 +80,29 @@ scanner:
   log_level: "info"            # Log level
   max_workers: 2               # Concurrent scan count
 
-# Automated response
-actions:
-  label:
-    enabled: true              # Enable label annotation
-    data:
-      security.status: "suspicious"
-      scanner.detected: "true"
+  rules_refresh_interval: "30s" # Refresh Admin-managed rules
+  health_port: 8081             # /healthz and /readyz
 
-# Detection rules
-detectionRules:
-  blacklist:
-    processes:                 # Blacklist processes
-      - "^miner$"
-      - "^xmrig$"
-      - "^crypto$"
-    keywords:                  # Blacklist keywords
-      - "stratum+tcp"
-      - "pool."
-      - "monero"
-
-  whitelist:
-    processes:                 # Whitelist processes
-      - "^sh$"
-      - "^bash$"
-      - "^python[0-9]*$"
-    namespaces:                # Whitelist namespaces
-      - "kube-system"
-      - "procscan"
-
-# Alert notifications
 notifications:
-  lark:
-    webhook: ""                # Lark Webhook URL
-    timeout: "30s"
-    retry_count: 3
+  admin:
+    base_url: "http://sealos-complik-admin:8080"
+    timeout: "10s"
+    basic_auth:
+      username: "${PROCSCAN_BASIC_AUTH_USERNAME}"
+      password: "${PROCSCAN_BASIC_AUTH_PASSWORD}"
 ```
+
+Notification targets and detection rules are loaded from Admin. See
+[`PROCSCAN_RULES_API.md`](../sealos-complik-admin/docs/PROCSCAN_RULES_API.md)
+for the backend contract exposed to Procscan and the management frontend.
 
 ### Detection Rules
 
-#### Blacklist Rules
-- **Process Name Matching**: Use regular expressions to match process names
-- **Keyword Matching**: Match suspicious keywords in command lines
-- **Supported Patterns**: `^miner$`, `^xmrig$`, `stratum+tcp`, etc.
-
-#### Whitelist Rules
-- **System Processes**: `sh`, `bash`, `python`, `java`, `node`, etc.
-- **System Namespaces**: `kube-system`, `procscan`, etc.
-- **Avoid False Positives**: Protect normal system processes and services
+- **Process Name Matching**: Use regular expressions to match process names.
+- **Command Keyword Matching**: Match suspicious command-line content.
+- **Actions**: Rules may alert; only high/critical process-name rules may request a ban.
+- **Exemptions**: Processes, commands, namespaces, and Pod names can be exempted.
+- **Safe Refresh**: Procscan keeps its last valid compiled ruleset if a refresh fails.
 
 ---
 
@@ -142,19 +117,20 @@ graph TD
     C --> D{Namespace Check}
     D -->|Non ns-prefixed| E[Ignore Process]
     D -->|ns-prefixed| F[Rule Matching]
-    F --> G{Blacklist Hit?}
-    G -->|No| H[Check Whitelist]
-    G -->|Yes| I[Execute Response Actions]
-    H --> I
+    F --> G{Rule Hit?}
+    G -->|No| K[Ignore]
+    G -->|Yes| H[Check Exemptions]
+    H -->|Exempt| K
+    H -->|Not exempt| I[Report Structured Event to Admin]
     I --> J[Send Alert Notification]
     J --> K[Wait for Next Scan]
 ```
 
 ### Response Mechanism
 
-1. **Label Annotation**: Add security labels to suspicious Pods
-2. **Alert Notification**: Send alert messages via Lark
-3. **Logging**: Detailed logging of detection process and results
+1. **Admin Report**: Report the rule revision, matched rule IDs, and workload attribution.
+2. **Admin Validation**: Admin revalidates the event against the current rules before invoking the ban workflow.
+3. **Alert and Logging**: Send Lark notifications and retain detailed detection logs.
 
 ---
 
@@ -206,18 +182,7 @@ spec:
         effect: "NoSchedule"
 ```
 
-### RBAC Permissions
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: procscan
-rules:
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "update"]
-```
+Procscan does not modify Kubernetes resources. Automatic namespace bans are submitted to Admin, so its ServiceAccount token is not mounted and no ClusterRole is required.
 
 ---
 
@@ -232,23 +197,12 @@ kubectl logs -n procscan -l app=procscan -f
 # Check Pod status
 kubectl get pods -n procscan -o wide
 
-# View detected threats
-kubectl get pods -l security.status=suspicious --all-namespaces
+# Check readiness and recent reports
+kubectl logs -n procscan -l app=procscan --tail=100
 ```
 
-### Alert Configuration
-
-Configure Lark Webhook:
-
-```bash
-# Edit ConfigMap
-kubectl edit configmap procscan-config -n procscan
-
-# Add Webhook URL
-notifications:
-  lark:
-    webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook"
-```
+Notification targets are managed through Admin's `procscan_notifications_runtime`
+configuration and exposed to Procscan through the dedicated runtime endpoint.
 
 ---
 
@@ -289,10 +243,9 @@ procscan/
 
 ### Common Issues
 
-1. **Insufficient Permissions**
+1. **Admin authentication or rule loading failed**
    ```bash
-   # Check RBAC permissions
-   kubectl auth can-i get pods --as=system:serviceaccount:procscan:procscan
+   kubectl logs -n procscan -l app=procscan | grep -E 'ruleset|unauthorized|NotReady'
    ```
 
 2. **Configuration File Error**

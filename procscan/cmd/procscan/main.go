@@ -17,14 +17,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/bearslyricattack/CompliK/procscan/internal/config"
 	"github.com/bearslyricattack/CompliK/procscan/internal/core/scanner"
+	"github.com/bearslyricattack/CompliK/procscan/internal/health"
 	legacy "github.com/bearslyricattack/CompliK/procscan/pkg/logger/legacy"
+	"github.com/bearslyricattack/CompliK/procscan/pkg/metrics"
 	"github.com/sirupsen/logrus"
 )
 
@@ -35,10 +40,12 @@ func main() {
 
 	legacy.L.Info("ProcScan is starting...")
 
-	// Load initial configuration
-	loader := config.NewLoader(*configPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go handleSignals(cancel)
 
-	cfg, err := loader.Load()
+	loader := config.NewLoader(*configPath)
+	cfg, err := loader.LoadLocal()
 	if err != nil {
 		legacy.L.Fatalf("Failed to load initial configuration: %v", err)
 	}
@@ -48,10 +55,28 @@ func main() {
 		legacy.SetLevel(cfg.Scanner.LogLevel)
 	}
 
-	legacy.L.Info("Initial configuration loaded successfully")
-
-	// Create scanner
 	s := scanner.NewScanner(cfg)
+	healthServer := health.NewServer(cfg.Scanner.HealthPort, s.Ready)
+	go func() {
+		if err := healthServer.Start(); err != nil {
+			legacy.L.WithError(err).Error("Health server stopped unexpectedly")
+			cancel()
+		}
+	}()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := healthServer.Stop(shutdownCtx); err != nil {
+			legacy.L.WithError(err).Warn("Failed to stop health server")
+		}
+	}()
+
+	if err := waitForInitialRules(ctx, loader, s); err != nil {
+		legacy.L.WithError(err).Error("Stopped before a valid ruleset became available")
+		return
+	}
+	legacy.L.Info("Initial configuration and rules loaded successfully")
+	go refreshRules(ctx, loader, s)
 
 	// Setup configuration watcher
 	configWatcher, err := config.NewWatcher(loader, s.UpdateConfig)
@@ -59,7 +84,6 @@ func main() {
 		legacy.L.WithError(err).
 			Warn("Failed to create configuration watcher, hot-reload will be unavailable")
 	} else {
-		ctx := context.Background()
 		if err := configWatcher.Start(ctx); err != nil {
 			legacy.L.WithError(err).
 				Warn("Failed to start configuration watcher, hot-reload will be unavailable")
@@ -72,17 +96,70 @@ func main() {
 		}
 	}
 
-	// Setup context and signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go handleSignals(cancel)
-
 	// Start scanner
 	if err := s.Start(ctx); err != nil {
 		legacy.L.Errorf("Failed to start scanner: %v", err)
 		return
 	}
+}
+
+func waitForInitialRules(ctx context.Context, loader *config.Loader, s *scanner.Scanner) error {
+	for {
+		config, err := loader.Refresh(ctx, s.CurrentConfig())
+		if err == nil {
+			err = s.ApplyConfig(config)
+			if err == nil && s.Ready() {
+				metrics.RulesRefreshSuccessTotal.Inc()
+				return nil
+			}
+			if err == nil {
+				err = errors.New("loaded ruleset is not ready")
+			}
+		}
+		metrics.RulesRefreshFailuresTotal.Inc()
+		legacy.L.WithError(err).Warn("No valid ruleset available; scanner remains NotReady")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(jittered(5 * time.Second)):
+		}
+	}
+}
+
+func refreshRules(ctx context.Context, loader *config.Loader, s *scanner.Scanner) {
+	for {
+		config := s.CurrentConfig()
+		interval := 30 * time.Second
+		if config != nil && config.Scanner.RulesRefreshInterval > 0 {
+			interval = config.Scanner.RulesRefreshInterval
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jittered(interval)):
+		}
+
+		refreshed, err := loader.Refresh(ctx, s.CurrentConfig())
+		if err != nil {
+			metrics.RulesRefreshFailuresTotal.Inc()
+			legacy.L.WithError(err).Warn("Rule refresh failed; keeping the last valid ruleset")
+			continue
+		}
+		if err := s.ApplyConfig(refreshed); err != nil {
+			metrics.RulesRefreshFailuresTotal.Inc()
+			legacy.L.WithError(err).Warn("Rule refresh rejected; keeping the last valid ruleset")
+			continue
+		}
+		metrics.RulesRefreshSuccessTotal.Inc()
+	}
+}
+
+func jittered(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return time.Second
+	}
+	factor := 0.8 + rand.Float64()*0.4
+	return time.Duration(float64(interval) * factor)
 }
 
 // handleSignals handles OS signals for graceful shutdown

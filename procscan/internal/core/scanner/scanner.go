@@ -18,35 +18,27 @@ package scanner
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"os"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/bearslyricattack/CompliK/procscan/internal/core/alert"
-	k8sClient "github.com/bearslyricattack/CompliK/procscan/internal/core/k8s"
 	"github.com/bearslyricattack/CompliK/procscan/internal/core/processor"
 	legacy "github.com/bearslyricattack/CompliK/procscan/pkg/logger/legacy"
 	"github.com/bearslyricattack/CompliK/procscan/pkg/metrics"
 	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
 	"github.com/sirupsen/logrus"
-	"k8s.io/client-go/kubernetes"
 )
 
 type Scanner struct {
 	config     *models.Config
 	processor  *processor.Processor
-	k8sClient  k8sClientInterface
 	metrics    *metrics.Collector
 	metricsSrv *metrics.Server
 	mu         sync.RWMutex
 	ticker     *time.Ticker
-}
-
-// k8sClientInterface defines the interface for Kubernetes client operations
-type k8sClientInterface interface {
-	LabelNamespace(namespaceName string, labels map[string]string) error
 }
 
 // ThreatInfo represents threat information structure
@@ -61,31 +53,8 @@ type ThreatInfo struct {
 	Labels      map[string]string
 }
 
-// K8sClientAdapter adapts Kubernetes clientset to k8sClientInterface
-type K8sClientAdapter struct {
-	clientset *kubernetes.Clientset
-}
-
-func (a *K8sClientAdapter) LabelNamespace(namespaceName string, labels map[string]string) error {
-	return k8sClient.LabelNamespace(a.clientset, namespaceName, labels)
-}
-
 // NewScanner creates a new scanner instance with the provided configuration
 func NewScanner(config *models.Config) *Scanner {
-	// Initialize Kubernetes client
-	k8sClientset, err := k8sClient.NewK8sClient()
-	if err != nil {
-		legacy.L.WithError(err).
-			Warn("Failed to create K8s client, labeling feature will be unavailable")
-
-		k8sClientset = nil
-	}
-
-	var k8sAdapter k8sClientInterface
-	if k8sClientset != nil {
-		k8sAdapter = &K8sClientAdapter{clientset: k8sClientset}
-	}
-
 	// Initialize metrics collector
 	metricsCollector := metrics.NewCollector()
 
@@ -104,16 +73,40 @@ func NewScanner(config *models.Config) *Scanner {
 	return &Scanner{
 		config:     config,
 		processor:  processor.NewProcessor(config),
-		k8sClient:  k8sAdapter,
 		metrics:    metricsCollector,
 		metricsSrv: metricsServer,
 	}
 }
 
-// UpdateConfig updates the scanner configuration and applies changes
-func (s *Scanner) UpdateConfig(newConfig *models.Config) {
+func (s *Scanner) Ready() bool {
+	return s != nil && s.processor != nil && s.processor.Ready()
+}
+
+func (s *Scanner) CurrentConfig() *models.Config {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config == nil {
+		return nil
+	}
+	copy := *s.config
+	return &copy
+}
+
+// ApplyConfig validates and atomically applies a scanner configuration.
+func (s *Scanner) ApplyConfig(newConfig *models.Config) error {
+	if newConfig == nil {
+		return errors.New("config is nil")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.config != nil && newConfig.ProcscanRules.RulesetRevision < s.config.ProcscanRules.RulesetRevision {
+		return errors.New("ruleset revision rollback is not allowed")
+	}
+
+	if err := s.processor.UpdateConfig(newConfig); err != nil {
+		return err
+	}
 
 	legacy.L.Info("Applying new configuration...")
 
@@ -122,14 +115,6 @@ func (s *Scanner) UpdateConfig(newConfig *models.Config) {
 
 	if oldConfig.Scanner.LogLevel != newConfig.Scanner.LogLevel {
 		legacy.SetLevel(newConfig.Scanner.LogLevel)
-	}
-
-	if oldConfig.Actions.Label.Enabled != newConfig.Actions.Label.Enabled {
-		legacy.L.WithFields(logrus.Fields{
-			"key":  "actions.label.enabled",
-			"from": oldConfig.Actions.Label.Enabled,
-			"to":   newConfig.Actions.Label.Enabled,
-		}).Info("Configuration changed")
 	}
 
 	oldInterval := oldConfig.Scanner.ScanInterval
@@ -147,23 +132,23 @@ func (s *Scanner) UpdateConfig(newConfig *models.Config) {
 		}).Info("Configuration changed")
 	}
 
-	s.processor.UpdateConfig(newConfig)
 	legacy.L.Info("Detection rules refreshed")
+	metrics.RulesetRevision.Set(float64(s.processor.RulesetRevision()))
 
 	legacy.L.Info("Configuration hot-reloaded successfully")
+	return nil
+}
+
+// UpdateConfig is the file-watcher callback. Failed updates keep the last
+// valid configuration active.
+func (s *Scanner) UpdateConfig(newConfig *models.Config) {
+	if err := s.ApplyConfig(newConfig); err != nil {
+		legacy.L.WithError(err).Error("Configuration update rejected; keeping the last valid configuration")
+	}
 }
 
 // Start initializes and starts the scanner
 func (s *Scanner) Start(ctx context.Context) error {
-	s.processor = processor.NewProcessor(s.config)
-
-	// Check service initialization status
-	if s.k8sClient != nil {
-		legacy.L.Info("K8s client initialized successfully")
-	} else {
-		legacy.L.Warn("K8s client not initialized, labeling feature will be unavailable")
-	}
-
 	// Start metrics server
 	if s.metricsSrv != nil {
 		go func() {
@@ -180,8 +165,10 @@ func (s *Scanner) Start(ctx context.Context) error {
 		s.metrics.RecordScanStart()
 	}
 
+	s.mu.Lock()
 	initialInterval := s.config.Scanner.ScanInterval
 	s.ticker = time.NewTicker(initialInterval)
+	s.mu.Unlock()
 
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
@@ -309,11 +296,9 @@ func (s *Scanner) scanProcesses() error {
 	for namespace, processInfos := range resultsByNamespace {
 		s.reportProcscanViolations(processInfos)
 
-		labelResult := s.handleGroupedActions(namespace, currentConfig)
 		finalResults = append(finalResults, &alert.NamespaceScanResult{
 			Namespace:    namespace,
 			ProcessInfos: processInfos,
-			LabelResult:  labelResult,
 		})
 	}
 
@@ -330,50 +315,4 @@ func (s *Scanner) scanProcesses() error {
 	legacy.L.Info("Scan round completed")
 
 	return nil
-}
-
-func (s *Scanner) handleGroupedActions(
-	namespace string,
-	config *models.Config,
-) (labelResult string) {
-	if config.Actions.Label.Enabled {
-		if s.k8sClient != nil {
-			labels := config.Actions.Label.Data
-			if len(labels) == 0 {
-				labels = map[string]string{"block.sealos.io/locked": "true"}
-			}
-
-			legacy.L.WithFields(logrus.Fields{
-				"namespace": namespace,
-				"labels":    labels,
-			}).Info("Adding security labels to namespace")
-
-			if err := s.k8sClient.LabelNamespace(namespace, labels); err != nil {
-				legacy.L.WithFields(logrus.Fields{
-					"namespace": namespace,
-				}).WithError(err).Error("Failed to add security labels to namespace")
-				labelResult = fmt.Sprintf("Failed: %v", err)
-
-				if s.metrics != nil {
-					s.metrics.RecordLabelAction(false)
-				}
-			} else {
-				labelResult = "Success"
-
-				legacy.L.WithFields(logrus.Fields{
-					"namespace": namespace,
-				}).Info("Security labels added successfully, waiting for external controller to process")
-
-				if s.metrics != nil {
-					s.metrics.RecordLabelAction(true)
-				}
-			}
-		} else {
-			labelResult = "Cannot execute (K8s client unavailable)"
-		}
-	} else {
-		labelResult = "Feature disabled"
-	}
-
-	return labelResult
 }

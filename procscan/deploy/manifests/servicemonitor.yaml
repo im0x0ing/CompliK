@@ -126,17 +126,6 @@ spec:
             summary: "ProcScan memory usage is high on {{ $labels.instance }}"
             description: "ProcScan memory usage is {{ $value }}MB on {{ $labels.instance }}"
 
-        # Alert when label actions are failing
-        - alert: ProcScanLabelActionFailures
-          expr: rate(procscan_label_actions_total[5m]) - rate(procscan_label_actions_success_total[5m]) > 0.1
-          for: 2m
-          labels:
-            severity: warning
-            service: procscan
-          annotations:
-            summary: "ProcScan label actions are failing on {{ $labels.instance }}"
-            description: "ProcScan label action failure rate is {{ $value }} per second on {{ $labels.instance }}"
-
         # Alert when notifications are failing
         - alert: ProcScanNotificationFailures
           expr: rate(procscan_notifications_failed_total[5m]) > 0.05

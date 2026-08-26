@@ -41,7 +41,6 @@ type LarkMessage struct {
 type NamespaceScanResult struct {
 	Namespace    string
 	ProcessInfos []*models.ProcessInfo
-	LabelResult  string
 }
 
 // SendGlobalBatchAlert constructs and sends aggregated alert using Markdown format
@@ -172,17 +171,11 @@ func formatSummarySection(region, nodeName string, totalProcesses, namespaceCoun
 
 func formatNamespaceSection(index int, result *NamespaceScanResult) string {
 	namespace := displayValue(result.Namespace, "未知")
-	analyses := buildLabelAnalysis(result.Namespace, result.LabelResult)
-	lines := make([]string, 0, len(analyses)+4)
-	lines = append(lines,
+	lines := []string{
 		fmt.Sprintf("**命名空间分组 %d**", index),
-		"命名空间："+quoteValue(namespace),
+		"命名空间：" + quoteValue(namespace),
 		fmt.Sprintf("异常进程数量：`%d`", len(result.ProcessInfos)),
-		"处置状态："+quoteValue(getStatusText(result.LabelResult)),
-	)
-
-	for _, analysis := range analyses {
-		lines = append(lines, "分析建议："+analysis)
+		"处置状态：" + quoteValue("已上报 Admin，由自动封禁策略决定"),
 	}
 
 	return strings.Join(lines, "\n")
@@ -209,61 +202,6 @@ func formatProcessSection(index int, info *models.ProcessInfo) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// getStatusText converts label result to user-friendly status text
-func getStatusText(labelResult string) string {
-	lower := strings.ToLower(strings.TrimSpace(labelResult))
-	if lower == "" {
-		return "未返回处置结果"
-	}
-
-	if strings.Contains(lower, "disabled") || strings.Contains(lower, "feature disabled") {
-		return "未开启自动处置"
-	}
-
-	if strings.Contains(lower, "success") {
-		return "已成功添加安全标签"
-	}
-
-	if strings.Contains(lower, "cannot execute") || strings.Contains(lower, "unavailable") {
-		return "未执行自动处置"
-	}
-
-	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
-		return "自动处置失败"
-	}
-
-	return "状态待确认"
-}
-
-func buildLabelAnalysis(namespace, labelResult string) []string {
-	lower := strings.ToLower(strings.TrimSpace(labelResult))
-	analyses := make([]string, 0, 3)
-
-	switch {
-	case lower == "":
-		analyses = append(analyses, "当前未返回命名空间处置状态，可能未开启自动处置，或本轮仅完成了告警发送。")
-	case strings.Contains(lower, "disabled"):
-		analyses = append(analyses, "自动打标功能当前未开启，本轮只会发送告警，不会对命名空间执行自动处置。")
-	case strings.Contains(lower, "success"):
-		analyses = append(analyses, "命名空间标签已经写入成功，请继续核查下游控制器是否按预期执行隔离、封禁或其他处置动作。")
-	case strings.Contains(lower, "cannot execute") || strings.Contains(lower, "unavailable"):
-		analyses = append(
-			analyses,
-			"自动处置未执行，可能是 Kubernetes 客户端未初始化、集群内凭据不可用，或当前环境不具备访问 API Server 的能力。",
-		)
-	case strings.Contains(lower, "failed") || strings.Contains(lower, "error"):
-		analyses = append(analyses, "命名空间打标失败，常见原因包括 RBAC 权限不足、目标命名空间不存在、API Server 不可达，或标签键值不合法。")
-	default:
-		analyses = append(analyses, "命名空间处置状态无法直接识别，请结合服务日志中的原始返回详情继续排查。")
-	}
-
-	if isUnknownValue(namespace) {
-		analyses = append(analyses, "当前命名空间信息缺失或为未知，自动处置可能无法命中真实资源，请优先检查容器元数据解析链路。")
-	}
-
-	return analyses
 }
 
 func buildProcessAnalysis(info *models.ProcessInfo) []string {

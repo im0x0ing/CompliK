@@ -25,20 +25,11 @@ import (
 
 // ScannerConfig defines scanner configuration
 type ScannerConfig struct {
-	ProcPath     string        `yaml:"proc_path"`
-	ScanInterval time.Duration `yaml:"scan_interval"`
-	LogLevel     string        `yaml:"log_level"`
-}
-
-// LabelActionConfig defines label action configuration
-type LabelActionConfig struct {
-	Enabled bool              `yaml:"enabled"`
-	Data    map[string]string `yaml:"data"`
-}
-
-// ActionsConfig defines action configuration
-type ActionsConfig struct {
-	Label LabelActionConfig `yaml:"label"`
+	ProcPath             string        `yaml:"proc_path"`
+	ScanInterval         time.Duration `yaml:"scan_interval"`
+	RulesRefreshInterval time.Duration `yaml:"rules_refresh_interval"`
+	HealthPort           int           `yaml:"health_port"`
+	LogLevel             string        `yaml:"log_level"`
 }
 
 // LarkNotificationConfig defines Lark (Feishu) notification configuration
@@ -69,7 +60,6 @@ type DetectionRules struct {
 // Config defines the main configuration structure
 type Config struct {
 	Scanner        ScannerConfig       `yaml:"scanner"`
-	Actions        ActionsConfig       `yaml:"actions"`
 	Notifications  NotificationsConfig `yaml:"notifications"`
 	DetectionRules DetectionRules      `yaml:"detectionRules"`
 }

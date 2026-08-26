@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/bearslyricattack/CompliK/procscan/internal/container"
+	procscanrules "github.com/bearslyricattack/CompliK/procscan/internal/rules"
 	legacy "github.com/bearslyricattack/CompliK/procscan/pkg/logger/legacy"
 	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
 	"github.com/sirupsen/logrus"
@@ -45,6 +46,8 @@ type compiledRules struct {
 type Processor struct {
 	ProcPath string
 	rules    compiledRules
+	matcher  *procscanrules.Matcher
+	revision uint64
 	mu       sync.RWMutex
 }
 
@@ -74,12 +77,17 @@ func NewProcessor(config *models.Config) *Processor {
 }
 
 // UpdateConfig updates the processor's detection rules from the new configuration
-func (p *Processor) UpdateConfig(config *models.Config) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+func (p *Processor) UpdateConfig(config *models.Config) error {
+	var matcher *procscanrules.Matcher
+	if config.ProcscanRules.RulesetRevision > 0 {
+		compiled, err := procscanrules.Compile(config.ProcscanRules)
+		if err != nil {
+			return fmt.Errorf("compile procscan rules: %w", err)
+		}
+		matcher = compiled
+	}
 	rules := config.DetectionRules
-	p.rules = compiledRules{
+	legacyRules := compiledRules{
 		blacklistProcesses:  compileRules(rules.Blacklist.Processes),
 		blacklistKeywords:   compileRules(rules.Blacklist.Keywords),
 		whitelistProcesses:  compileRules(rules.Whitelist.Processes),
@@ -87,6 +95,32 @@ func (p *Processor) UpdateConfig(config *models.Config) {
 		whitelistNamespaces: compileRules(rules.Whitelist.Namespaces),
 		whitelistPodNames:   compileRules(rules.Whitelist.PodNames),
 	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.rules = compiledRules{
+		blacklistProcesses:  legacyRules.blacklistProcesses,
+		blacklistKeywords:   legacyRules.blacklistKeywords,
+		whitelistProcesses:  legacyRules.whitelistProcesses,
+		whitelistCommands:   legacyRules.whitelistCommands,
+		whitelistNamespaces: legacyRules.whitelistNamespaces,
+		whitelistPodNames:   legacyRules.whitelistPodNames,
+	}
+	p.matcher = matcher
+	p.revision = config.ProcscanRules.RulesetRevision
+	return nil
+}
+
+func (p *Processor) Ready() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.matcher != nil && p.revision > 0
+}
+
+func (p *Processor) RulesetRevision() uint64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.revision
 }
 
 // GetAllProcesses returns a list of all process IDs from the proc filesystem
@@ -154,20 +188,31 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 	})
 	procLogger.Debug("Starting process analysis,Process Info:")
 
-	// Step 1: Check if process matches blacklist
-	isBlacklisted, message := p.isBlacklisted(processName, cmdline)
-	if !isBlacklisted {
-		procLogger.Debug("Process not in blacklist, skipping")
-		return nil, nil
+	matchResult, revision, structured := p.matchStructured(procscanrules.Sample{
+		ProcessName: processName,
+		Command:     cmdline,
+	})
+	message := ""
+	if structured {
+		if matchResult == nil {
+			procLogger.Debug("Process did not match an enabled rule or was exempted")
+			return nil, nil
+		}
+		message = fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
+	} else {
+		isBlacklisted, legacyMessage := p.isBlacklisted(processName, cmdline)
+		if !isBlacklisted {
+			procLogger.Debug("Process not in blacklist, skipping")
+			return nil, nil
+		}
+		message = legacyMessage
+		if p.isProcessWhitelisted(processName, cmdline) {
+			procLogger.Info("Process matched whitelist")
+			return nil, nil
+		}
 	}
 
-	procLogger.WithField("reason", message).Info("Process matched blacklist rule")
-
-	// Step 2: Check process whitelist
-	if p.isProcessWhitelisted(processName, cmdline) {
-		procLogger.Info("Process matched whitelist")
-		return nil, nil
-	}
+	procLogger.WithField("reason", message).Info("Process matched detection rule")
 
 	// Step 3: Identify container main process
 	mainProcessPID := pid
@@ -199,16 +244,22 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 	containerID := p.getContainerIDFromPID(mainProcessPID)
 
 	// Step 5: Query container info on-demand when container metadata is available.
-	var podName, namespace string
+	var podName, namespace, podUID string
+	attributionStatus := "resolved"
+	attributionReason := ""
 	if containerID == "" {
+		attributionStatus = "unresolved"
+		attributionReason = "container_id_missing"
 		procLogger.WithFields(logrus.Fields{
 			"container_metadata_degraded": true,
 			"container_metadata_reason":   "container_id_missing",
 			"main_process_pid":            mainProcessPID,
 		}).Warn("Unable to determine container ID, continue alerting without container metadata")
 	} else {
-		podName, namespace, err = container.GetContainerInfo(containerID)
+		podName, namespace, podUID, err = container.GetContainerInfo(containerID)
 		if err != nil {
+			attributionStatus = "unresolved"
+			attributionReason = "cri_lookup_failed"
 			procLogger.WithFields(logrus.Fields{
 				"containerID":                 containerID,
 				"container_metadata_degraded": true,
@@ -219,29 +270,52 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 
 			podName = ""
 			namespace = ""
+		} else if strings.TrimSpace(namespace) == "" {
+			attributionStatus = "unresolved"
+			attributionReason = "namespace_missing"
 		}
 	}
 
-	// Step 6: Check infrastructure whitelist
-	if (namespace != "" || podName != "") && p.isInfraWhitelisted(namespace, podName) {
-		procLogger.WithFields(logrus.Fields{
-			"namespace": namespace,
-			"pod":       podName,
-		}).Info("Infrastructure matched whitelist")
-
+	if structured {
+		matchResult, revision, _ = p.matchStructured(procscanrules.Sample{
+			ProcessName: processName,
+			Command:     cmdline,
+			Namespace:   namespace,
+			PodName:     podName,
+		})
+		if matchResult == nil {
+			procLogger.Info("Process or infrastructure matched an exemption")
+			return nil, nil
+		}
+		message = fmt.Sprintf("process matched rule %q", matchResult.PrimaryRule.ID)
+	} else if (namespace != "" || podName != "") && p.isInfraWhitelisted(namespace, podName) {
+		procLogger.Info("Infrastructure matched whitelist")
 		return nil, nil
 	}
 
 	processInfo := &models.ProcessInfo{
-		PID:         pid,
-		ProcessName: processName,
-		Command:     cmdline,
-		Timestamp:   time.Now().Format(time.RFC3339),
-		ContainerID: displayValueOrUnknown(containerID),
-		Message:     message,
-		PodName:     displayValueOrUnknown(podName),
-		Namespace:   displayValueOrUnknown(namespace),
-		IsIllegal:   true,
+		PID:               pid,
+		ProcessName:       processName,
+		Command:           cmdline,
+		Timestamp:         time.Now().Format(time.RFC3339),
+		ProcessStartTime:  p.getProcessStartTime(pid),
+		ContainerID:       containerID,
+		Message:           message,
+		PodName:           podName,
+		PodUID:            podUID,
+		Namespace:         namespace,
+		IsIllegal:         true,
+		RulesetRevision:   revision,
+		AttributionStatus: attributionStatus,
+		AttributionReason: attributionReason,
+	}
+	if matchResult != nil {
+		processInfo.PrimaryRuleID = matchResult.PrimaryRule.ID
+		processInfo.MatchedRuleIDs = append([]string{}, matchResult.MatchedRuleIDs...)
+		processInfo.MatchType = matchResult.PrimaryRule.MatchType
+		processInfo.MatchRule = matchResult.PrimaryRule.Pattern
+		processInfo.Severity = matchResult.PrimaryRule.Severity
+		processInfo.RuleAction = matchResult.PrimaryRule.Action
 	}
 
 	// Step 7: Confirmed as suspicious process
@@ -254,6 +328,37 @@ func (p *Processor) AnalyzeProcess(pid int) (*models.ProcessInfo, error) {
 	}).Warn("Confirmed malicious process detected")
 
 	return processInfo, nil
+}
+
+func (p *Processor) getProcessStartTime(pid int) string {
+	statPath := filepath.Join(p.ProcPath, strconv.Itoa(pid), "stat")
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		return ""
+	}
+
+	content := string(data)
+	closeParen := strings.LastIndexByte(content, ')')
+	if closeParen < 0 || closeParen+2 >= len(content) {
+		return ""
+	}
+
+	// After the command name, fields start at /proc stat field 3.
+	fields := strings.Fields(content[closeParen+2:])
+	if len(fields) <= 19 {
+		return ""
+	}
+
+	return fields[19]
+}
+
+func (p *Processor) matchStructured(sample procscanrules.Sample) (*procscanrules.MatchResult, uint64, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.matcher == nil {
+		return nil, 0, false
+	}
+	return p.matcher.Match(sample), p.revision, true
 }
 
 // isBlacklisted checks if a process name or command line matches blacklist rules

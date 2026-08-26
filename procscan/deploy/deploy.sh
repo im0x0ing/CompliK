@@ -30,12 +30,6 @@ else
     exit 1
 fi
 
-if kubectl auth can-i create clusterrole &> /dev/null; then
-    echo "✅ 有创建 ClusterRole 的权限"
-else
-    echo "⚠️  没有创建 ClusterRole 的权限，可能需要集群管理员权限"
-fi
-
 # 部署资源
 echo ""
 echo "🏗️  开始部署 Block-ProcScan..."
@@ -46,14 +40,17 @@ kubectl apply -f manifests/namespace.yaml
 echo "2️⃣ 创建服务账户..."
 kubectl apply -f manifests/serviceaccount.yaml
 
-echo "3️⃣ 创建权限配置..."
-kubectl apply -f manifests/clusterrole.yaml
-kubectl apply -f manifests/clusterrolebinding.yaml
+# Older versions granted the Procscan ServiceAccount cluster-scoped read access.
+# The current version reports to Admin only and does not need this RBAC.
+kubectl delete clusterrolebinding block-procscan --ignore-not-found || \
+    echo "⚠️  无权删除旧 ClusterRoleBinding，请由集群管理员清理 block-procscan"
+kubectl delete clusterrole block-procscan --ignore-not-found || \
+    echo "⚠️  无权删除旧 ClusterRole，请由集群管理员清理 block-procscan"
 
-echo "4️⃣ 创建配置文件..."
+echo "3️⃣ 创建配置文件..."
 kubectl apply -f manifests/configmap.yaml
 
-echo "5️⃣ 部署 DaemonSet..."
+echo "4️⃣ 部署 DaemonSet..."
 kubectl apply -f manifests/daemonset.yaml
 
 echo ""
@@ -78,13 +75,6 @@ echo "   kubectl get daemonset -n $NAMESPACE"
 echo ""
 echo "📋 查看日志:"
 echo "   kubectl logs -n $NAMESPACE -l app=block-procscan -f"
-echo ""
-echo "🧪 测试功能:"
-echo "   # 创建测试命名空间"
-echo "   kubectl create namespace test-security"
-echo "   "
-echo "   # 查看命名空间标签"
-echo "   kubectl get namespace test-security --show-labels"
 echo ""
 echo "🧹 卸载 Block-ProcScan:"
 echo "   kubectl delete -f manifests/

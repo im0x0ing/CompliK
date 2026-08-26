@@ -40,15 +40,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            - name: ADMIN_BASIC_AUTH_USERNAME
+            - name: PROCSCAN_BASIC_AUTH_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: sealos-complik-admin-auth
+                  name: sealos-complik-procscan-auth
                   key: username
-            - name: ADMIN_BASIC_AUTH_PASSWORD
+            - name: PROCSCAN_BASIC_AUTH_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: sealos-complik-admin-auth
+                  name: sealos-complik-procscan-auth
                   key: password
           securityContext:
             privileged: false
@@ -67,6 +67,21 @@ spec:
             - name: metrics
               containerPort: 8080
               protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
           volumeMounts:
             - name: proc
               mountPath: /host/proc

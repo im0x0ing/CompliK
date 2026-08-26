@@ -95,24 +95,13 @@ topk(10, procscan_suspicious_processes_by_namespace)
 sort_desc(sum(procscan_suspicious_processes_by_namespace) by (namespace))
 ```
 
-### 5. Response Action Metrics
+### 5. Rule Refresh Metrics
 
 | Metric Name | Type | Description | Purpose |
 |---------|------|------|------|
-| `procscan_label_actions_total` | Counter | Number of label action attempts | Monitor automated response frequency |
-| `procscan_label_actions_success_total` | Counter | Number of successful label actions | Evaluate automated response success rate |
-
-**Usage Scenarios:**
-```promql
-# Automated response frequency
-rate(procscan_label_actions_total[5m])
-
-# Label action success rate
-procscan_label_actions_success_total / procscan_label_actions_total
-
-# Label action failure rate
-rate(procscan_label_actions_total - procscan_label_actions_success_total[5m])
-```
+| `procscan_ruleset_revision` | Gauge | Current validated ruleset revision | Confirm all nodes use the expected rules |
+| `procscan_rules_refresh_success_total` | Counter | Successful refresh count | Monitor rule distribution |
+| `procscan_rules_refresh_failures_total` | Counter | Failed refresh count | Alert on stale rules |
 
 ### 6. Notification Metrics
 
@@ -304,7 +293,7 @@ groups:
    - Suspicious process distribution (heatmap)
 
 4. **Automated Response Panel**
-   - Label action success rate (single stat)
+   - Ruleset revision and refresh status (single stat)
    - Notification sending status (time series)
    - Response action frequency (time series)
 

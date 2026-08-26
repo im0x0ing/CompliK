@@ -76,9 +76,6 @@ func (v *ConfigValidator) registerDefaultRules() {
 	})
 	v.AddRule("scanner.proc_path", &PathRule{})
 
-	// Action configuration rules
-	v.AddRule("actions.label.enabled", &BooleanRule{})
-
 	// Notification configuration rules
 	v.AddRule("notifications.lark.webhook", &URLRule{
 		RequiredSchemes: []string{"https", "http"},
@@ -128,9 +125,6 @@ func (v *ConfigValidator) Validate(config *models.Config) *ValidationResult {
 	// Validate scanner configuration
 	v.validateScanner(config.Scanner, result)
 
-	// Validate actions configuration
-	v.validateActions(config.Actions, result)
-
 	// Validate notifications configuration
 	v.validateNotifications(config.Notifications, result)
 
@@ -169,22 +163,6 @@ func (v *ConfigValidator) validateScanner(scanner models.ScannerConfig, result *
 		result.Warnings = append(
 			result.Warnings,
 			"scanner.proc_path is empty, will use default value /host/proc",
-		)
-	}
-}
-
-// validateActions validates actions configuration
-func (v *ConfigValidator) validateActions(actions models.ActionsConfig, result *ValidationResult) {
-	// Validate label action
-	if err := v.validateField("actions.label.enabled", actions.Label.Enabled); err != nil {
-		result.Errors = append(result.Errors, err.Error())
-	}
-
-	// Security check: when label functionality is working normally, security labels will be automatically added
-	if actions.Label.Enabled {
-		result.Warnings = append(
-			result.Warnings,
-			"Label functionality is enabled, detected threats will be marked and await external controller processing",
 		)
 	}
 }
@@ -265,14 +243,6 @@ func (v *ConfigValidator) validateCrossFields(config *models.Config, result *Val
 		result.Warnings = append(
 			result.Warnings,
 			"Scan interval is too short, may increase system load",
-		)
-	}
-
-	// Check action configuration logic
-	if config.Actions.Label.Enabled {
-		result.Warnings = append(
-			result.Warnings,
-			"Detected threats will be marked, please ensure external controller is monitoring these labels",
 		)
 	}
 

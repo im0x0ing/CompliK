@@ -24,20 +24,11 @@ import (
 
 // ScannerConfig contains the core configuration for the scanner itself
 type ScannerConfig struct {
-	ProcPath     string        `yaml:"proc_path"`
-	ScanInterval time.Duration `yaml:"scan_interval"`
-	LogLevel     string        `yaml:"log_level"`
-}
-
-// LabelActionConfig contains configuration for label actions
-type LabelActionConfig struct {
-	Enabled bool              `yaml:"enabled"`
-	Data    map[string]string `yaml:"data"`
-}
-
-// ActionsConfig aggregates all available automated actions
-type ActionsConfig struct {
-	Label LabelActionConfig `yaml:"label"`
+	ProcPath             string        `yaml:"proc_path"`
+	ScanInterval         time.Duration `yaml:"scan_interval"`
+	RulesRefreshInterval time.Duration `yaml:"rules_refresh_interval"`
+	HealthPort           int           `yaml:"health_port"`
+	LogLevel             string        `yaml:"log_level"`
 }
 
 // LarkNotificationConfig contains configuration for Lark notification channel
@@ -90,26 +81,62 @@ type DetectionRules struct {
 	Whitelist RuleSet `yaml:"whitelist"`
 }
 
+type ProcscanRule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	MatchType   string `json:"match_type"`
+	Pattern     string `json:"pattern"`
+	Severity    string `json:"severity"`
+	Action      string `json:"action"`
+}
+
+type ProcscanExemptions struct {
+	Processes  []string `json:"processes"`
+	Commands   []string `json:"commands"`
+	Namespaces []string `json:"namespaces"`
+	PodNames   []string `json:"pod_names"`
+}
+
+type ProcscanRuleSet struct {
+	SchemaVersion   int                `json:"schema_version"`
+	RulesetRevision uint64             `json:"ruleset_revision"`
+	Rules           []ProcscanRule     `json:"rules"`
+	Exemptions      ProcscanExemptions `json:"exemptions"`
+}
+
 // Config is the final, unified top-level configuration structure
 type Config struct {
 	Scanner        ScannerConfig       `yaml:"scanner"`
-	Actions        ActionsConfig       `yaml:"actions"`
 	Notifications  NotificationsConfig `yaml:"notifications"`
 	Metrics        MetricsConfig       `yaml:"metrics"`
 	DetectionRules DetectionRules      `yaml:"detectionRules"`
+	ProcscanRules  ProcscanRuleSet     `yaml:"-"`
 }
 
 // --- Business data models ---
 
 // ProcessInfo stores complete information for a detected suspicious process.
 type ProcessInfo struct {
-	PID         int
-	ProcessName string
-	Command     string
-	PodName     string
-	Namespace   string
-	ContainerID string
-	Timestamp   string
-	Message     string
-	IsIllegal   bool
+	PID               int
+	ProcessName       string
+	Command           string
+	PodName           string
+	PodUID            string
+	Namespace         string
+	ContainerID       string
+	Timestamp         string
+	ProcessStartTime  string
+	Message           string
+	IsIllegal         bool
+	RulesetRevision   uint64
+	PrimaryRuleID     string
+	MatchedRuleIDs    []string
+	MatchType         string
+	MatchRule         string
+	Severity          string
+	RuleAction        string
+	AttributionStatus string
+	AttributionReason string
 }

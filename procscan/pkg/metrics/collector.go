@@ -67,15 +67,6 @@ func (c *Collector) RecordSuspiciousProcesses(count int, namespace string) {
 	SuspiciousProcessesByNamespace.WithLabelValues(namespace).Set(float64(count))
 }
 
-// RecordLabelAction records a label operation
-func (c *Collector) RecordLabelAction(success bool) {
-	LabelActionsTotal.Inc()
-
-	if success {
-		LabelActionsSuccessTotal.Inc()
-	}
-}
-
 // RecordNotification records a notification send attempt
 func (c *Collector) RecordNotification(success bool) {
 	if success {

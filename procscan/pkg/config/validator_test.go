@@ -68,11 +68,6 @@ var _ = Describe("ConfigValidator", func() {
 					ScanInterval: 60 * time.Second,
 					LogLevel:     "info",
 				},
-				Actions: models.ActionsConfig{
-					Label: models.LabelActionConfig{
-						Enabled: false,
-					},
-				},
 				Notifications: models.NotificationsConfig{
 					Lark: models.LarkNotificationConfig{
 						Webhook: "https://open.feishu.cn/webhook",
@@ -281,36 +276,6 @@ var _ = Describe("ConfigValidator", func() {
 			Expect(found).To(BeTrue())
 		})
 	})
-
-	Describe("validateActions", func() {
-		It("should warn when label is enabled", func() {
-			config := &models.Config{
-				Scanner: models.ScannerConfig{
-					ScanInterval: 60 * time.Second,
-					LogLevel:     "info",
-				},
-				Actions: models.ActionsConfig{
-					Label: models.LabelActionConfig{
-						Enabled: true,
-					},
-				},
-			}
-
-			result := validator.Validate(config)
-			Expect(result.Warnings).NotTo(BeEmpty())
-
-			found := false
-			for _, warning := range result.Warnings {
-				if strings.Contains(warning, "Label functionality") {
-					found = true
-					break
-				}
-			}
-
-			Expect(found).To(BeTrue())
-		})
-	})
-
 	Describe("ListAllRules", func() {
 		It("should return all registered rules", func() {
 			allRules := validator.ListAllRules()

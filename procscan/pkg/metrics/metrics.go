@@ -47,6 +47,21 @@ var (
 		Help: "Total number of scan errors",
 	})
 
+	RulesetRevision = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "procscan_ruleset_revision",
+		Help: "Current validated procscan ruleset revision",
+	})
+
+	RulesRefreshSuccessTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "procscan_rules_refresh_success_total",
+		Help: "Total number of successful procscan rules refreshes",
+	})
+
+	RulesRefreshFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "procscan_rules_refresh_failures_total",
+		Help: "Total number of failed procscan rules refreshes",
+	})
+
 	// Threat detection metrics
 	ThreatsDetectedTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "procscan_threats_detected_total",
@@ -72,17 +87,6 @@ var (
 		Name: "procscan_suspicious_processes_by_namespace",
 		Help: "Number of suspicious processes detected by namespace",
 	}, []string{"namespace"})
-
-	// Response action metrics
-	LabelActionsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "procscan_label_actions_total",
-		Help: "Total number of label actions attempted",
-	})
-
-	LabelActionsSuccessTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "procscan_label_actions_success_total",
-		Help: "Total number of successful label actions",
-	})
 
 	NotificationsSentTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "procscan_notifications_sent_total",

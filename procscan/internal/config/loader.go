@@ -23,11 +23,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bearslyricattack/CompliK/procscan/internal/adminauth"
@@ -36,9 +35,10 @@ import (
 )
 
 const (
-	procscanNotificationsConfigType = "procscan_notifications_runtime"
-	procscanRulesConfigType         = "procscan_rules"
-	defaultAdminConfigTimeout       = 5 * time.Second
+	procscanRuntimeConfigPath = "/api/procscan/runtime-config"
+	procscanRulesPath         = "/api/procscan/rules"
+	procscanLegacyRulesPath   = "/api/procscan/rules/legacy"
+	defaultAdminConfigTimeout = 5 * time.Second
 )
 
 var defaultAdminClient = &http.Client{Timeout: defaultAdminConfigTimeout}
@@ -47,11 +47,9 @@ var defaultAdminClient = &http.Client{Timeout: defaultAdminConfigTimeout}
 type Loader struct {
 	configPath string
 	lastHash   string
-}
-
-type adminProjectConfigResponse struct {
-	ConfigName  string          `json:"config_name"`
-	ConfigValue json.RawMessage `json:"config_value"`
+	rulesETag  string
+	lastRules  models.ProcscanRuleSet
+	mu         sync.Mutex
 }
 
 type remoteNotificationsConfig struct {
@@ -68,6 +66,17 @@ func NewLoader(configPath string) *Loader {
 
 // Load reads and parses the configuration file
 func (l *Loader) Load() (*models.Config, error) {
+	config, err := l.LoadLocal()
+	if err != nil {
+		return nil, err
+	}
+	if err := l.LoadRemote(context.Background(), config); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+func (l *Loader) LoadLocal() (*models.Config, error) {
 	if _, err := os.Stat(l.configPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("configuration file does not exist: %s", l.configPath)
 	}
@@ -85,19 +94,52 @@ func (l *Loader) Load() (*models.Config, error) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse configuration file: %w", err)
 	}
-
-	// Update last hash
-	hash, _ := l.calculateHash()
-	l.lastHash = hash
-
-	if err := l.loadAdminConfig(&config); err != nil {
-		return nil, err
+	if config.Scanner.ProcPath == "" {
+		config.Scanner.ProcPath = "/host/proc"
 	}
+	if config.Scanner.ScanInterval <= 0 {
+		config.Scanner.ScanInterval = 100 * time.Second
+	}
+	if config.Scanner.RulesRefreshInterval <= 0 {
+		config.Scanner.RulesRefreshInterval = 30 * time.Second
+	}
+	if config.Scanner.HealthPort <= 0 {
+		config.Scanner.HealthPort = 8081
+	}
+	if config.Scanner.LogLevel == "" {
+		config.Scanner.LogLevel = "info"
+	}
+
+	// Update last hash after the file has been parsed successfully.
+	hash, hashErr := l.calculateHash()
+	if hashErr != nil {
+		return nil, fmt.Errorf("hash configuration file: %w", hashErr)
+	}
+	l.mu.Lock()
+	l.lastHash = hash
+	l.mu.Unlock()
 
 	return &config, nil
 }
 
-func (l *Loader) loadAdminConfig(config *models.Config) error {
+func (l *Loader) Refresh(ctx context.Context, previous *models.Config) (*models.Config, error) {
+	config, err := l.LoadLocal()
+	if err != nil {
+		return nil, err
+	}
+	if previous != nil {
+		config.ProcscanRules = previous.ProcscanRules
+	}
+	if err := l.LoadRemote(ctx, config); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+func (l *Loader) LoadRemote(ctx context.Context, config *models.Config) error {
+	if config == nil {
+		return errors.New("config is required")
+	}
 	adminBaseURL := strings.TrimSpace(config.Notifications.Admin.BaseURL)
 	if adminBaseURL == "" {
 		return errors.New("notifications.admin.base_url is required")
@@ -108,137 +150,185 @@ func (l *Loader) loadAdminConfig(config *models.Config) error {
 		config.Notifications.Admin.BasicAuth.Password,
 	)
 
-	notifications, err := l.loadRemoteNotificationsConfig(
+	notifications, _, _, err := loadRemoteJSON[remoteNotificationsConfig](
+		ctx,
 		adminBaseURL,
+		procscanRuntimeConfigPath,
 		config.Notifications.Admin.Timeout,
 		auth,
+		"",
 	)
 	if err != nil {
 		return fmt.Errorf("load notifications config from admin: %w", err)
 	}
 
 	if notifications.Region == nil || strings.TrimSpace(*notifications.Region) == "" {
-		return fmt.Errorf("admin config %q missing region", procscanNotificationsConfigType)
+		return errors.New("procscan runtime config missing region")
 	}
 
 	if notifications.Webhook == nil || strings.TrimSpace(*notifications.Webhook) == "" {
-		return fmt.Errorf("admin config %q missing webhook", procscanNotificationsConfigType)
+		return errors.New("procscan runtime config missing webhook")
 	}
 
 	config.Notifications.Region = strings.TrimSpace(*notifications.Region)
 	config.Notifications.Lark.Webhook = strings.TrimSpace(*notifications.Webhook)
 
-	rules, err := l.loadRemoteRulesConfig(adminBaseURL, config.Notifications.Admin.Timeout, auth)
+	rules, err := l.loadRemoteRules(
+		ctx,
+		adminBaseURL,
+		config.Notifications.Admin.Timeout,
+		auth,
+		config.ProcscanRules,
+	)
 	if err != nil {
 		return fmt.Errorf("load detection rules config from admin: %w", err)
 	}
-
-	config.DetectionRules = *rules
+	config.ProcscanRules = rules
 
 	return nil
 }
 
-func (l *Loader) loadRemoteNotificationsConfig(
+func (l *Loader) loadRemoteRules(
+	ctx context.Context,
 	adminBaseURL string,
 	timeout time.Duration,
 	auth adminauth.BasicAuth,
-) (*remoteNotificationsConfig, error) {
-	var config remoteNotificationsConfig
-	if err := l.loadRemoteConfigValue(
+	current models.ProcscanRuleSet,
+) (models.ProcscanRuleSet, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	rules, etag, status, err := loadRemoteJSON[models.ProcscanRuleSet](
+		ctx,
 		adminBaseURL,
+		procscanRulesPath,
 		timeout,
-		procscanNotificationsConfigType,
-		&config,
 		auth,
-	); err != nil {
-		return nil, err
-	}
-
-	return &config, nil
-}
-
-func (l *Loader) loadRemoteRulesConfig(
-	adminBaseURL string,
-	timeout time.Duration,
-	auth adminauth.BasicAuth,
-) (*models.DetectionRules, error) {
-	var rules models.DetectionRules
-	if err := l.loadRemoteConfigValue(
-		adminBaseURL,
-		timeout,
-		procscanRulesConfigType,
-		&rules,
-		auth,
-	); err != nil {
-		return nil, err
-	}
-
-	return &rules, nil
-}
-
-func (l *Loader) loadRemoteConfigValue(
-	adminBaseURL string,
-	timeout time.Duration,
-	configType string,
-	target any,
-	auth adminauth.BasicAuth,
-) error {
-	endpoint := strings.TrimRight(
-		adminBaseURL,
-		"/",
-	) + "/api/configs/type/" + url.PathEscape(
-		configType,
+		l.rulesETag,
 	)
+	if err == nil {
+		if status == http.StatusNotModified {
+			if l.lastRules.RulesetRevision > current.RulesetRevision {
+				return l.lastRules, nil
+			}
+			if current.RulesetRevision > 0 {
+				return current, nil
+			}
+			return models.ProcscanRuleSet{}, errors.New("rules returned not modified without a cached ruleset")
+		}
+		if rules.RulesetRevision < l.lastRules.RulesetRevision {
+			return models.ProcscanRuleSet{}, fmt.Errorf(
+				"ruleset revision regressed from %d to %d",
+				l.lastRules.RulesetRevision,
+				rules.RulesetRevision,
+			)
+		}
+		l.rulesETag = etag
+		l.lastRules = *rules
+		return *rules, nil
+	}
+	if status != http.StatusNotFound && status != http.StatusMethodNotAllowed {
+		return models.ProcscanRuleSet{}, err
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	legacy, _, _, legacyErr := loadRemoteJSON[models.DetectionRules](
+		ctx,
+		adminBaseURL,
+		procscanLegacyRulesPath,
+		timeout,
+		auth,
+		"",
+	)
+	if legacyErr != nil {
+		return models.ProcscanRuleSet{}, errors.Join(err, legacyErr)
+	}
+	converted := convertLegacyRules(*legacy)
+	if converted.RulesetRevision < l.lastRules.RulesetRevision {
+		return models.ProcscanRuleSet{}, fmt.Errorf(
+			"legacy ruleset revision %d would regress current revision %d",
+			converted.RulesetRevision,
+			l.lastRules.RulesetRevision,
+		)
+	}
+	l.rulesETag = ""
+	l.lastRules = converted
+	return converted, nil
+}
+
+func loadRemoteJSON[T any](
+	parent context.Context,
+	adminBaseURL string,
+	path string,
+	timeout time.Duration,
+	auth adminauth.BasicAuth,
+	etag string,
+) (*T, string, int, error) {
+	if timeout <= 0 {
+		timeout = defaultAdminConfigTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
+	endpoint := strings.TrimRight(adminBaseURL, "/") + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return fmt.Errorf("create %s request: %w", configType, err)
+		return nil, "", 0, fmt.Errorf("create request: %w", err)
 	}
-
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 	auth.Apply(req)
 
 	resp, err := adminClient(timeout).Do(req)
 	if err != nil {
-		return fmt.Errorf("request %s: %w", configType, err)
+		return nil, "", 0, fmt.Errorf("request %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		return nil, resp.Header.Get("ETag"), resp.StatusCode, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-
-		return fmt.Errorf(
+		return nil, "", resp.StatusCode, fmt.Errorf(
 			"request %s: status %d, body %s",
-			configType,
+			path,
 			resp.StatusCode,
 			strings.TrimSpace(string(body)),
 		)
 	}
 
-	var payloads []adminProjectConfigResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payloads); err != nil {
-		return fmt.Errorf("decode %s response: %w", configType, err)
+	var payload T
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, "", resp.StatusCode, fmt.Errorf("decode %s response: %w", path, err)
 	}
+	return &payload, resp.Header.Get("ETag"), resp.StatusCode, nil
+}
 
-	if len(payloads) == 0 {
-		return fmt.Errorf("%s response is empty", configType)
+func convertLegacyRules(legacy models.DetectionRules) models.ProcscanRuleSet {
+	rules := make([]models.ProcscanRule, 0, len(legacy.Blacklist.Processes)+len(legacy.Blacklist.Keywords))
+	appendRules := func(matchType, prefix string, patterns []string) {
+		for _, pattern := range patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			sum := sha256.Sum256([]byte(matchType + "\x00" + pattern))
+			rules = append(rules, models.ProcscanRule{
+				ID: prefix + "-" + hex.EncodeToString(sum[:])[:16], Name: "Legacy rule: " + pattern,
+				Enabled: true, MatchType: matchType, Pattern: pattern, Severity: "medium", Action: "alert",
+			})
+		}
 	}
-
-	sort.Slice(payloads, func(i, j int) bool {
-		return payloads[i].ConfigName < payloads[j].ConfigName
-	})
-
-	if len(payloads[0].ConfigValue) == 0 {
-		return fmt.Errorf("%s config value is empty", configType)
+	appendRules("process_name", "legacy-process", legacy.Blacklist.Processes)
+	appendRules("command_keyword", "legacy-keyword", legacy.Blacklist.Keywords)
+	return models.ProcscanRuleSet{
+		SchemaVersion: 2, RulesetRevision: 1, Rules: rules,
+		Exemptions: models.ProcscanExemptions{
+			Processes: legacy.Whitelist.Processes, Commands: legacy.Whitelist.Commands,
+			Namespaces: legacy.Whitelist.Namespaces, PodNames: legacy.Whitelist.PodNames,
+		},
 	}
-
-	if err := json.Unmarshal(payloads[0].ConfigValue, target); err != nil {
-		return fmt.Errorf("decode %s config value: %w", configType, err)
-	}
-
-	return nil
 }
 
 func adminClient(timeout time.Duration) *http.Client {
@@ -254,6 +344,9 @@ func (l *Loader) HasChanged() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	if l.lastHash == "" {
 		l.lastHash = currentHash

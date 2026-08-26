@@ -8,21 +8,17 @@ data:
     scanner:
       proc_path: "/host/proc"
       scan_interval: "1000s"
+      rules_refresh_interval: "30s"
+      health_port: 8081
       log_level: "info"
-
-    actions:
-      label:
-        enabled: false
-        data:
-          block.sealos.io/locked: "true"
 
     notifications:
       admin:
         base_url: "http://sealos-complik-admin:8080"
         timeout: "10s"
         basic_auth:
-          username: "${ADMIN_BASIC_AUTH_USERNAME}"
-          password: "${ADMIN_BASIC_AUTH_PASSWORD}"
+          username: "${PROCSCAN_BASIC_AUTH_USERNAME}"
+          password: "${PROCSCAN_BASIC_AUTH_PASSWORD}"
 
     metrics:
       enabled: false

@@ -30,6 +30,25 @@ func TestProcessor(t *testing.T) {
 	RunSpecs(t, "Processor Suite")
 }
 
+func TestGetProcessStartTime(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidDir := filepath.Join(tmpDir, "1234")
+	if err := os.MkdirAll(pidDir, 0o700); err != nil {
+		t.Fatalf("mkdir pid dir: %v", err)
+	}
+
+	// The substring after the final ')' starts at /proc stat field 3.
+	stat := "1234 (process name with ) paren) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20"
+	if err := os.WriteFile(filepath.Join(pidDir, "stat"), []byte(stat), 0o600); err != nil {
+		t.Fatalf("write stat: %v", err)
+	}
+
+	processor := NewProcessor(&models.Config{Scanner: models.ScannerConfig{ProcPath: tmpDir}})
+	if got := processor.getProcessStartTime(1234); got != "19" {
+		t.Fatalf("getProcessStartTime() = %q, want %q", got, "19")
+	}
+}
+
 var _ = Describe("Processor", func() {
 	Describe("compileRules", func() {
 		It("should compile valid regex patterns", func() {

@@ -29,11 +29,11 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
-// GetContainerInfo retrieves pod name and namespace for a given container ID via on-demand query
-func GetContainerInfo(containerID string) (string, string, error) {
+// GetContainerInfo retrieves pod identity for a given container ID via on-demand query.
+func GetContainerInfo(containerID string) (string, string, string, error) {
 	conn, err := createGRPCConnection()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create connection: %w", err)
+		return "", "", "", fmt.Errorf("failed to create connection: %w", err)
 	}
 	defer conn.Close()
 
@@ -46,29 +46,37 @@ func GetContainerInfo(containerID string) (string, string, error) {
 
 	statusResp, err := client.ContainerStatus(ctx, statusReq)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get container status: %w", err)
+		return "", "", "", fmt.Errorf("failed to get container status: %w", err)
 	}
 
 	if statusResp.GetStatus() == nil {
-		return "", "", errors.New("container status is empty")
+		return "", "", "", errors.New("container status is empty")
 	}
 
-	podNamespace := statusResp.GetStatus().GetLabels()["io.kubernetes.pod.namespace"]
+	labels := statusResp.GetStatus().GetLabels()
+	podNamespace := labels["io.kubernetes.pod.namespace"]
 
-	podName := statusResp.GetStatus().GetLabels()["io.kubernetes.pod.name"]
+	podName := labels["io.kubernetes.pod.name"]
 	if podName == "" {
-		return "", "", errors.New(
+		return "", "", "", errors.New(
 			"cannot find pod name (io.kubernetes.pod.name) in container labels",
 		)
 	}
 
 	if podNamespace == "" {
-		return "", "", errors.New(
+		return "", "", "", errors.New(
 			"cannot find pod namespace (io.kubernetes.pod.namespace) in container labels",
 		)
 	}
 
-	return podName, podNamespace, nil
+	podUID := labels["io.kubernetes.pod.uid"]
+	if podUID == "" {
+		return "", "", "", errors.New(
+			"cannot find pod uid (io.kubernetes.pod.uid) in container labels",
+		)
+	}
+
+	return podName, podNamespace, podUID, nil
 }
 
 // createGRPCConnection establishes a gRPC connection to the container runtime

@@ -83,11 +83,6 @@ func (e *EnvLoader) LoadFromEnv(config *models.Config) error {
 		return fmt.Errorf("failed to load scanner configuration: %w", err)
 	}
 
-	// Load actions configuration
-	if err := e.loadActionsConfig(&config.Actions); err != nil {
-		return fmt.Errorf("failed to load actions configuration: %w", err)
-	}
-
 	// Load notifications configuration
 	if err := e.loadNotificationsConfig(&config.Notifications); err != nil {
 		return fmt.Errorf("failed to load notifications configuration: %w", err)
@@ -109,16 +104,6 @@ func (e *EnvLoader) loadScannerConfig(scanner *models.ScannerConfig) error {
 		"scanner.proc_path":     &scanner.ProcPath,
 		"scanner.scan_interval": &scanner.ScanInterval,
 		"scanner.log_level":     &scanner.LogLevel,
-	}
-
-	return e.loadConfigMap(configMap)
-}
-
-// loadActionsConfig loads actions configuration
-func (e *EnvLoader) loadActionsConfig(actions *models.ActionsConfig) error {
-	configMap := map[string]any{
-		"actions.label.enabled": &actions.Label.Enabled,
-		"actions.label.data":    &actions.Label.Data,
 	}
 
 	return e.loadConfigMap(configMap)
