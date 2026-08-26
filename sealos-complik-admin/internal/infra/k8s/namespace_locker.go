@@ -47,10 +47,6 @@ func NewNamespaceLocker() (NamespaceLocker, error) {
 	return &namespaceLocker{client: client}, nil
 }
 
-func NewNoopNamespaceLocker() NamespaceLocker {
-	return noopNamespaceLocker{}
-}
-
 func (l *namespaceLocker) EnsureLocked(ctx context.Context, namespace string) (bool, error) {
 	return l.ensureLabel(ctx, namespace, true)
 }
@@ -121,14 +117,6 @@ func (l *namespaceLocker) ensureLabel(
 	}
 
 	return changed, nil
-}
-
-func (noopNamespaceLocker) EnsureLocked(context.Context, string) (bool, error) {
-	return false, nil
-}
-
-func (noopNamespaceLocker) EnsureUnlocked(context.Context, string) (bool, error) {
-	return false, nil
 }
 
 func loadConfig() (*rest.Config, error) {

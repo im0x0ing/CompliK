@@ -11,10 +11,19 @@ import (
 )
 
 const (
-	policyConfigType    = "autoban_policy"
-	defaultOperatorName = "system/autoban"
-	defaultReasonPrefix = "Admin auto-ban"
+	policyConfigType      = "autoban_policy"
+	defaultOperatorName   = "system/autoban"
+	defaultReasonPrefix   = "Admin auto-ban"
+	tenantNamespacePrefix = "ns-"
 )
+
+var protectedNamespaces = []string{
+	"kube-system",
+	"kube-public",
+	"kube-node-lease",
+	"sealos",
+	"block-system",
+}
 
 type Policy struct {
 	Enabled              bool
@@ -235,6 +244,12 @@ func trimStrings(values []string) []string {
 func (p Policy) allowsNamespace(namespace string) bool {
 	trimmedNamespace := strings.TrimSpace(namespace)
 	if trimmedNamespace == "" {
+		return false
+	}
+	if !strings.HasPrefix(trimmedNamespace, tenantNamespacePrefix) {
+		return false
+	}
+	if slices.Contains(protectedNamespaces, trimmedNamespace) {
 		return false
 	}
 

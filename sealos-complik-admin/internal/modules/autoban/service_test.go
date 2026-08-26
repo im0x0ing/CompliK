@@ -74,7 +74,7 @@ func TestHandleViolationCreatesBan(t *testing.T) {
 	svc.now = func() time.Time { return fixed }
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "  demo-ns  ",
+		Namespace:    "  ns-demo  ",
 		Source:       SourceProcscan,
 		DetectorName: "miner-rule",
 		Summary:      "suspicious command",
@@ -91,7 +91,7 @@ func TestHandleViolationCreatesBan(t *testing.T) {
 	}
 
 	req := fake.createReqs[0]
-	if req.Namespace != "demo-ns" {
+	if req.Namespace != "ns-demo" {
 		t.Fatalf("unexpected namespace: %q", req.Namespace)
 	}
 
@@ -122,7 +122,7 @@ func TestHandleViolationCreatesBanForComplik(t *testing.T) {
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceComplik,
 		DetectorName: "keyword-rule",
 		Summary:      "blocked content detected",
@@ -136,7 +136,7 @@ func TestHandleViolationCreatesBanForComplik(t *testing.T) {
 		t.Fatalf("expected 1 ban request, got %d", len(fake.createReqs))
 	}
 
-	if fake.createReqs[0].Namespace != "demo-ns" {
+	if fake.createReqs[0].Namespace != "ns-demo" {
 		t.Fatalf("unexpected namespace: %q", fake.createReqs[0].Namespace)
 	}
 
@@ -158,7 +158,7 @@ func TestHandleViolationHonorsProcessNamePolicy(t *testing.T) {
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceProcscan,
 		ProcessName:  "xmrig",
 		DetectorName: "miner-rule",
@@ -169,7 +169,7 @@ func TestHandleViolationHonorsProcessNamePolicy(t *testing.T) {
 	}
 
 	err = svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceProcscan,
 		ProcessName:  "nginx",
 		DetectorName: "web-rule",
@@ -180,7 +180,7 @@ func TestHandleViolationHonorsProcessNamePolicy(t *testing.T) {
 	}
 
 	err = svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceProcscan,
 		ProcessName:  "systemd",
 		DetectorName: "system-rule",
@@ -204,7 +204,7 @@ func TestHandleViolationUsesConservativeDefaultPolicy(t *testing.T) {
 	svc := NewService(nil, fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceProcscan,
 		DetectorName: "miner-rule",
 		IsIllegal:    true,
@@ -222,6 +222,50 @@ func TestHandleViolationUsesConservativeDefaultPolicy(t *testing.T) {
 	}
 }
 
+func TestHandleViolationRejectsNonTenantNamespaces(t *testing.T) {
+	fake := &fakeBanService{}
+	svc := NewService(policyRepo(`{
+		"enabled": true,
+		"dryRun": false,
+		"sources": { "procscan": { "enabled": true } }
+	}`), fake)
+
+	for _, namespace := range []string{"default", "ingress-nginx", "kube-system", "demo-ns"} {
+		if err := svc.HandleViolation(context.Background(), Violation{
+			Namespace: namespace,
+			Source:    SourceProcscan,
+			IsIllegal: true,
+		}); err != nil {
+			t.Fatalf("HandleViolation() error = %v for %s", err, namespace)
+		}
+	}
+
+	if len(fake.createReqs) != 0 {
+		t.Fatalf("non-tenant namespace was submitted for ban: %+v", fake.createReqs)
+	}
+}
+
+func TestHandleViolationAlwaysProtectsSystemNamespaces(t *testing.T) {
+	fake := &fakeBanService{}
+	svc := NewService(policyRepo(`{
+		"enabled": true,
+		"dryRun": false,
+		"sources": { "procscan": { "enabled": true } },
+		"namespaceAllowlist": ["kube-system"]
+	}`), fake)
+
+	if err := svc.HandleViolation(context.Background(), Violation{
+		Namespace: "kube-system",
+		Source:    SourceProcscan,
+		IsIllegal: true,
+	}); err != nil {
+		t.Fatalf("HandleViolation() error = %v", err)
+	}
+	if len(fake.createReqs) != 0 {
+		t.Fatalf("system namespace was submitted for ban: %+v", fake.createReqs)
+	}
+}
+
 func TestHandleViolationSkipsDryRunPolicy(t *testing.T) {
 	fake := &fakeBanService{}
 	svc := NewService(policyRepo(`{
@@ -233,7 +277,7 @@ func TestHandleViolationSkipsDryRunPolicy(t *testing.T) {
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceComplik,
 		DetectorName: "detector",
 		IsIllegal:    true,
@@ -262,7 +306,7 @@ func TestHandleViolationSkipsWhenAlreadyBanned(t *testing.T) {
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Source:       SourceComplik,
 		DetectorName: "detector",
 		IsIllegal:    true,
@@ -336,11 +380,11 @@ func TestHandleViolationHonorsNamespacePolicy(t *testing.T) {
 		"sources": {
 			"procscan": { "enabled": true }
 		},
-		"namespaceAllowlist": ["allowed"],
-		"namespaceDenylist": ["denied"]
+		"namespaceAllowlist": ["ns-allowed"],
+		"namespaceDenylist": ["ns-denied"]
 	}`), fake)
 
-	for _, namespace := range []string{"denied", "other"} {
+	for _, namespace := range []string{"ns-denied", "ns-other"} {
 		err := svc.HandleViolation(context.Background(), Violation{
 			Namespace: namespace,
 			Source:    SourceProcscan,
@@ -352,7 +396,7 @@ func TestHandleViolationHonorsNamespacePolicy(t *testing.T) {
 	}
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace: "allowed",
+		Namespace: "ns-allowed",
 		Source:    SourceProcscan,
 		IsIllegal: true,
 	})
@@ -364,7 +408,7 @@ func TestHandleViolationHonorsNamespacePolicy(t *testing.T) {
 		t.Fatalf("expected 1 ban request, got %d", len(fake.createReqs))
 	}
 
-	if fake.createReqs[0].Namespace != "allowed" {
+	if fake.createReqs[0].Namespace != "ns-allowed" {
 		t.Fatalf("unexpected namespace: %q", fake.createReqs[0].Namespace)
 	}
 }
@@ -381,7 +425,7 @@ func TestHandleViolationReturnsExecutorError(t *testing.T) {
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace: "demo-ns",
+		Namespace: "ns-demo",
 		Source:    SourceProcscan,
 		IsIllegal: true,
 	})
