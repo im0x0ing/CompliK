@@ -2,8 +2,11 @@ package procscanviolation
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
 
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 	"sealos-complik-admin/internal/modules/violationquery"
 )
@@ -12,30 +15,14 @@ type Repository struct {
 	db *gorm.DB
 }
 
-const procscanEffectiveViolationCondition = `
-(
-	JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$."进程信息"."是否违规"')) = 'true'
-	OR JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.process_info.IsIllegal')) = 'true'
-	OR JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.process_info.is_illegal')) = 'true'
-	OR JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.is_illegal')) = 'true'
-	OR JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '$.IsIllegal')) = 'true'
-	OR (
-		JSON_EXTRACT(raw_payload, '$."进程信息"."是否违规"') IS NULL
-		AND JSON_EXTRACT(raw_payload, '$.process_info.IsIllegal') IS NULL
-		AND JSON_EXTRACT(raw_payload, '$.process_info.is_illegal') IS NULL
-		AND JSON_EXTRACT(raw_payload, '$.is_illegal') IS NULL
-		AND JSON_EXTRACT(raw_payload, '$.IsIllegal') IS NULL
-		AND is_illegal = TRUE
-	)
-)
-`
+const procscanEffectiveViolationCondition = "is_illegal = TRUE"
 
 func NewRepository(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) CreateViolation(ctx context.Context, violation *ProcscanViolationEvent) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+func (r *Repository) CreateViolation(ctx context.Context, violation *ProcscanViolationEvent) (bool, error) {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(violation).Error; err != nil {
 			return err
 		}
@@ -48,6 +35,48 @@ func (r *Repository) CreateViolation(ctx context.Context, violation *ProcscanVio
 
 		return nil
 	})
+	if err == nil {
+		return true, nil
+	}
+
+	var mysqlErr *mysqlDriver.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return false, nil
+	}
+
+	return false, err
+}
+
+func (r *Repository) GetViolationByEventID(
+	ctx context.Context,
+	eventID string,
+) (*ProcscanViolationEvent, error) {
+	var violation ProcscanViolationEvent
+	if err := r.db.WithContext(ctx).
+		Where("event_id = ?", eventID).
+		First(&violation).Error; err != nil {
+		return nil, err
+	}
+
+	return &violation, nil
+}
+
+func (r *Repository) UpdateAutobanDecision(
+	ctx context.Context,
+	id uint64,
+	status string,
+	reason string,
+	attemptCount int,
+	nextRetryAt *time.Time,
+) error {
+	return r.db.WithContext(ctx).Model(&ProcscanViolationEvent{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"autoban_status":        status,
+			"autoban_reason":        reason,
+			"autoban_attempt_count": attemptCount,
+			"autoban_next_retry_at": nextRetryAt,
+		}).Error
 }
 
 func (r *Repository) GetViolationsByNamespace(

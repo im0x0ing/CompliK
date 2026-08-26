@@ -33,12 +33,15 @@ import (
 )
 
 type Scanner struct {
-	config     *models.Config
-	processor  *processor.Processor
-	metrics    *metrics.Collector
-	metricsSrv *metrics.Server
-	mu         sync.RWMutex
-	ticker     *time.Ticker
+	config        *models.Config
+	processor     *processor.Processor
+	metrics       *metrics.Collector
+	metricsSrv    *metrics.Server
+	mu            sync.RWMutex
+	ticker        *time.Ticker
+	reportMu      sync.RWMutex
+	reportQueue   chan *models.ProcessInfo
+	reportStarted bool
 }
 
 // ThreatInfo represents threat information structure
@@ -149,6 +152,8 @@ func (s *Scanner) UpdateConfig(newConfig *models.Config) {
 
 // Start initializes and starts the scanner
 func (s *Scanner) Start(ctx context.Context) error {
+	s.ensureAdminReporter(ctx)
+
 	// Start metrics server
 	if s.metricsSrv != nil {
 		go func() {
@@ -195,6 +200,7 @@ func (s *Scanner) runScanLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			legacy.L.Info("Scanner stopped")
+			s.stopAdminReporter()
 
 			if s.metricsSrv != nil {
 				if err := s.metricsSrv.Stop(ctx); err != nil {
@@ -294,7 +300,7 @@ func (s *Scanner) scanProcesses() error {
 
 	finalResults := make([]*alert.NamespaceScanResult, 0, len(resultsByNamespace))
 	for namespace, processInfos := range resultsByNamespace {
-		s.reportProcscanViolations(processInfos)
+		s.enqueueAdminReports(processInfos)
 
 		finalResults = append(finalResults, &alert.NamespaceScanResult{
 			Namespace:    namespace,

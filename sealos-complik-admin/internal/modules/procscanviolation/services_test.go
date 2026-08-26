@@ -285,7 +285,7 @@ func TestShouldRetryAutobanOnlyForUnevaluatedOrFailedEvents(t *testing.T) {
 			got := shouldRetryAutoban(&ProcscanViolationEvent{
 				AutobanStatus: tt.status,
 				AutobanReason: tt.reason,
-			})
+			}, time.Now().UTC())
 			if got != tt.want {
 				t.Fatalf("shouldRetryAutoban() = %v, want %v", got, tt.want)
 			}

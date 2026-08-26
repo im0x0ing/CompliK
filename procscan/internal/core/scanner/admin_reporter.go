@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/bearslyricattack/CompliK/procscan/internal/adminauth"
-	legacy "github.com/bearslyricattack/CompliK/procscan/pkg/logger/legacy"
 	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
 )
 
@@ -52,26 +51,7 @@ type procscanViolationRequest struct {
 }
 
 func (s *Scanner) reportProcscanViolations(processInfos []*models.ProcessInfo) {
-	endpoint, ok := s.adminEndpoint()
-	if !ok {
-		legacy.L.Info("Admin reporting is disabled because notifications.admin.base_url is empty")
-		return
-	}
-
-	for _, processInfo := range processInfos {
-		if processInfo == nil {
-			continue
-		}
-
-		if err := s.reportProcscanViolation(endpoint, processInfo); err != nil {
-			legacy.L.WithFields(map[string]any{
-				"namespace": processInfo.Namespace,
-				"pod":       processInfo.PodName,
-				"pid":       processInfo.PID,
-				"error":     err.Error(),
-			}).Error("Failed to report procscan violation to admin")
-		}
-	}
+	s.enqueueAdminReports(processInfos)
 }
 
 func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.ProcessInfo) error {
@@ -144,7 +124,8 @@ func procscanEventID(processInfo *models.ProcessInfo, nodeName string, detectedA
 		strings.TrimSpace(processInfo.MatchRule),
 	}, "\x00")
 	if strings.TrimSpace(processInfo.ProcessStartTime) == "" {
-		fingerprint += "\x00" + detectedAt.UTC().Format(time.RFC3339Nano)
+		fingerprint += "\x00" + strings.TrimSpace(processInfo.ProcessName)
+		fingerprint += "\x00" + strings.TrimSpace(processInfo.Command)
 	}
 	sum := sha256.Sum256([]byte(fingerprint))
 	return hex.EncodeToString(sum[:])

@@ -2,32 +2,71 @@ package procscanviolation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 	"sealos-complik-admin/internal/modules/autoban"
 	"sealos-complik-admin/internal/modules/pagequery"
+	"sealos-complik-admin/internal/modules/procscanrule"
 	"sealos-complik-admin/internal/modules/violationquery"
 )
 
 var (
 	ErrViolationInvalidInput = errors.New(
-		"namespace, pid, process name, process command, message, and detected time are required",
+		"pid, process name, process command, message, and detected time are required",
 	)
 	ErrViolationNotFound = errors.New("procscan violation not found")
 )
 
-type Service struct {
-	repository *Repository
-	autoban    autoban.Handler
+const (
+	maxMatchedRuleIDs = 64
+	maxRawPayloadSize = 64 << 10
+)
+
+type AttributionVerifier interface {
+	VerifyContainer(
+		ctx context.Context,
+		namespace string,
+		podName string,
+		podUID string,
+		containerID string,
+		nodeName string,
+	) error
 }
 
-func NewService(repository *Repository, autobanHandler autoban.Handler) *Service {
-	return &Service{repository: repository, autoban: autobanHandler}
+type Service struct {
+	repository          *Repository
+	autoban             autoban.DecisionHandler
+	rules               *procscanrule.Service
+	attributionVerifier AttributionVerifier
+	now                 func() time.Time
+}
+
+func NewService(
+	repository *Repository,
+	autobanHandler autoban.DecisionHandler,
+	ruleService *procscanrule.Service,
+	verifier ...AttributionVerifier,
+) *Service {
+	var attributionVerifier AttributionVerifier
+	if len(verifier) > 0 {
+		attributionVerifier = verifier[0]
+	}
+	return &Service{
+		repository:          repository,
+		autoban:             autobanHandler,
+		rules:               ruleService,
+		attributionVerifier: attributionVerifier,
+		now:                 time.Now,
+	}
 }
 
 func (s *Service) CreateViolation(ctx context.Context, req CreateViolationRequest) error {
@@ -40,10 +79,16 @@ func (s *Service) CreateViolation(ctx context.Context, req CreateViolationReques
 	if err != nil {
 		return err
 	}
+	matchedRuleIDsJSON, err := marshalStringSlice(input.MatchedRuleIDs)
+	if err != nil {
+		return err
+	}
 
 	violation := &ProcscanViolationEvent{
+		EventID:           stringPointer(input.EventID),
 		Namespace:         input.Namespace,
 		PodName:           input.PodName,
+		PodUID:            input.PodUID,
 		ContainerID:       input.ContainerID,
 		NodeName:          input.NodeName,
 		PID:               input.PID,
@@ -51,6 +96,15 @@ func (s *Service) CreateViolation(ctx context.Context, req CreateViolationReques
 		ProcessCommand:    input.ProcessCommand,
 		MatchType:         input.MatchType,
 		MatchRule:         input.MatchRule,
+		RulesetRevision:   input.RulesetRevision,
+		PrimaryRuleID:     input.PrimaryRuleID,
+		MatchedRuleIDs:    matchedRuleIDsJSON,
+		Severity:          input.Severity,
+		RuleAction:        input.RuleAction,
+		AttributionStatus: input.AttributionStatus,
+		AttributionReason: input.AttributionReason,
+		AutobanStatus:     autoban.DecisionNotTriggered,
+		AutobanReason:     "not_evaluated",
 		Message:           input.Message,
 		IsIllegal:         input.IsIllegal,
 		LabelActionStatus: input.LabelActionStatus,
@@ -59,33 +113,138 @@ func (s *Service) CreateViolation(ctx context.Context, req CreateViolationReques
 		RawPayload:        rawPayloadJSON,
 	}
 
-	if err := s.repository.CreateViolation(ctx, violation); err != nil {
+	created, err := s.repository.CreateViolation(ctx, violation)
+	if err != nil {
+		return translateRepositoryError(err)
+	}
+	if !created {
+		existing, err := s.repository.GetViolationByEventID(ctx, input.EventID)
+		if err != nil {
+			return translateRepositoryError(err)
+		}
+		if !shouldRetryAutoban(existing, s.now().UTC()) {
+			return nil
+		}
+		violation = existing
+		input = normalizedInputFromEvent(existing)
+	}
+
+	decision := s.validateAndHandleAutoban(ctx, input, violation)
+	attemptCount := violation.AutobanAttemptCount + 1
+	var nextRetryAt *time.Time
+	if shouldScheduleAutobanRetry(decision, attemptCount) {
+		retryAt := s.now().UTC().Add(autobanRetryDelay(attemptCount))
+		nextRetryAt = &retryAt
+	}
+
+	violation.AutobanStatus = decision.Status
+	violation.AutobanReason = decision.Reason
+	if err := s.repository.UpdateAutobanDecision(
+		ctx,
+		violation.ID,
+		decision.Status,
+		decision.Reason,
+		attemptCount,
+		nextRetryAt,
+	); err != nil {
 		return translateRepositoryError(err)
 	}
 
-	if s.autoban != nil {
-		if err := s.autoban.HandleViolation(ctx, autoban.Violation{
-			Namespace:    violation.Namespace,
-			Source:       autoban.SourceProcscan,
-			DetectorName: violation.MatchRule,
-			ProcessName:  violation.ProcessName,
-			Summary:      violation.Message,
-			Detail: strings.TrimSpace(strings.Join([]string{
-				"process_name=" + violation.ProcessName,
-				"process_command=" + violation.ProcessCommand,
-				"pod_name=" + violation.PodName,
-				"node_name=" + violation.NodeName,
-				"label_action_status=" + violation.LabelActionStatus,
-				"label_action_result=" + violation.LabelActionResult,
-			}, "\n")),
-			IsIllegal:  isEffectiveViolation(violation),
-			DetectedAt: violation.DetectedAt,
-		}); err != nil {
-			log.Printf("procscan autoban failed for %s: %v", violation.Namespace, err)
+	return nil
+}
+
+func (s *Service) validateAndHandleAutoban(
+	ctx context.Context,
+	input *normalizedViolationInput,
+	violation *ProcscanViolationEvent,
+) autoban.DecisionResult {
+	if input.AttributionStatus != "resolved" || input.Namespace == nil {
+		return autoban.DecisionResult{Status: autoban.DecisionNotTriggered, Reason: "unresolved_attribution"}
+	}
+	if input.PodUID == "" || s.attributionVerifier == nil {
+		return autoban.DecisionResult{
+			Status: autoban.DecisionNotTriggered,
+			Reason: "attribution_not_verified",
 		}
 	}
+	if err := s.attributionVerifier.VerifyContainer(
+		ctx,
+		*input.Namespace,
+		input.PodName,
+		input.PodUID,
+		input.ContainerID,
+		input.NodeName,
+	); err != nil {
+		log.Printf(
+			"procscan attribution verification failed for %s/%s: %v",
+			*input.Namespace,
+			input.PodName,
+			err,
+		)
+		var retryable interface{ Retryable() bool }
+		if errors.As(err, &retryable) && retryable.Retryable() {
+			return autoban.DecisionResult{
+				Status: autoban.DecisionFailed,
+				Reason: "attribution_verification_failed",
+			}
+		}
+		return autoban.DecisionResult{
+			Status: autoban.DecisionNotTriggered,
+			Reason: "attribution_verification_failed",
+		}
+	}
+	if s.rules == nil {
+		return autoban.DecisionResult{Status: autoban.DecisionFailed, Reason: "rule_service_unavailable"}
+	}
 
-	return nil
+	validation, err := s.rules.ValidateViolation(ctx, procscanrule.ViolationCandidate{
+		RulesetRevision: input.RulesetRevision,
+		PrimaryRuleID:   input.PrimaryRuleID,
+		MatchedRuleIDs:  input.MatchedRuleIDs,
+		MatchType:       procscanrule.MatchType(input.MatchType),
+		MatchRule:       input.MatchRule,
+		Severity:        procscanrule.Severity(input.Severity),
+		RuleAction:      procscanrule.Action(input.RuleAction),
+		Sample: procscanrule.ProcessSample{
+			ProcessName: input.ProcessName,
+			Command:     input.ProcessCommand,
+			Namespace:   *input.Namespace,
+			PodName:     input.PodName,
+		},
+	})
+	if err != nil {
+		log.Printf("procscan rule validation failed: %v", err)
+		return autoban.DecisionResult{Status: autoban.DecisionFailed, Reason: "rule_validation_failed"}
+	}
+	if !validation.Eligible {
+		return autoban.DecisionResult{Status: autoban.DecisionNotTriggered, Reason: validation.Reason}
+	}
+	if s.autoban == nil {
+		return autoban.DecisionResult{Status: autoban.DecisionNotTriggered, Reason: "autoban_handler_unavailable"}
+	}
+
+	decision, err := s.autoban.HandleViolationDecision(ctx, autoban.Violation{
+		Namespace:    *violation.Namespace,
+		Source:       autoban.SourceProcscan,
+		DetectorName: violation.PrimaryRuleID,
+		ProcessName:  violation.ProcessName,
+		Summary:      violation.Message,
+		Detail: strings.TrimSpace(strings.Join([]string{
+			"process_name=" + violation.ProcessName,
+			"process_command=" + violation.ProcessCommand,
+			"pod_name=" + violation.PodName,
+			"node_name=" + violation.NodeName,
+			"primary_rule_id=" + violation.PrimaryRuleID,
+			"ruleset_revision=" + strconv.FormatUint(violation.RulesetRevision, 10),
+		}, "\n")),
+		IsIllegal:     isEffectiveViolation(violation),
+		DetectedAt:    violation.DetectedAt,
+		RuleValidated: true,
+	})
+	if err != nil {
+		log.Printf("procscan autoban failed for %s: %v", *violation.Namespace, err)
+	}
+	return decision
 }
 
 func (s *Service) DeleteViolations(ctx context.Context, namespace string) error {
@@ -204,8 +363,10 @@ func (s *Service) GetViolationStatus(
 }
 
 type normalizedViolationInput struct {
-	Namespace         string
+	EventID           string
+	Namespace         *string
 	PodName           string
+	PodUID            string
 	ContainerID       string
 	NodeName          string
 	PID               int
@@ -213,6 +374,13 @@ type normalizedViolationInput struct {
 	ProcessCommand    string
 	MatchType         string
 	MatchRule         string
+	RulesetRevision   uint64
+	PrimaryRuleID     string
+	MatchedRuleIDs    []string
+	Severity          string
+	RuleAction        string
+	AttributionStatus string
+	AttributionReason string
 	Message           string
 	IsIllegal         bool
 	LabelActionStatus string
@@ -222,12 +390,48 @@ type normalizedViolationInput struct {
 }
 
 func normalizeViolationInput(req CreateViolationRequest) (*normalizedViolationInput, error) {
-	trimmedNamespace := strings.TrimSpace(req.Namespace)
+	if len(req.RawPayload) > maxRawPayloadSize ||
+		len(req.MatchedRuleIDs) > maxMatchedRuleIDs {
+		return nil, ErrViolationInvalidInput
+	}
+	if len(req.EventID) > 64 ||
+		(req.Namespace != nil && len(strings.TrimSpace(*req.Namespace)) > 255) ||
+		len(req.PodName) > 255 ||
+		len(req.PodUID) > 128 ||
+		len(req.ContainerID) > 128 ||
+		len(req.NodeName) > 128 ||
+		len(req.ProcessName) > 255 ||
+		len(req.ProcessCommand) > 4096 ||
+		len(req.MatchType) > 32 ||
+		len(req.MatchRule) > 1024 ||
+		len(req.PrimaryRuleID) > 255 ||
+		len(req.Severity) > 16 ||
+		len(req.RuleAction) > 16 ||
+		len(req.AttributionStatus) > 32 ||
+		len(req.AttributionReason) > 255 ||
+		len(req.Message) > 4096 ||
+		len(req.LabelActionStatus) > 32 ||
+		len(req.LabelActionResult) > 4096 {
+		return nil, ErrViolationInvalidInput
+	}
+	for _, ruleID := range req.MatchedRuleIDs {
+		if len(strings.TrimSpace(ruleID)) > 255 {
+			return nil, ErrViolationInvalidInput
+		}
+	}
+
+	var namespace *string
+	if req.Namespace != nil {
+		trimmed := strings.TrimSpace(*req.Namespace)
+		if trimmed != "" && !strings.EqualFold(trimmed, "unknown") {
+			namespace = &trimmed
+		}
+	}
 	trimmedProcessName := strings.TrimSpace(req.ProcessName)
 	trimmedProcessCommand := strings.TrimSpace(req.ProcessCommand)
 	trimmedMessage := strings.TrimSpace(req.Message)
 
-	if trimmedNamespace == "" || req.PID <= 0 || trimmedProcessName == "" ||
+	if req.PID <= 0 || trimmedProcessName == "" ||
 		trimmedProcessCommand == "" ||
 		trimmedMessage == "" ||
 		req.DetectedAt.IsZero() {
@@ -239,13 +443,26 @@ func normalizeViolationInput(req CreateViolationRequest) (*normalizedViolationIn
 		isIllegal = *req.IsIllegal
 	}
 
-	if rawIsIllegal, ok := readIsIllegalFromRawPayload(req.RawPayload); ok {
-		isIllegal = rawIsIllegal
+	attributionStatus := strings.TrimSpace(req.AttributionStatus)
+	if attributionStatus == "" {
+		if namespace == nil {
+			attributionStatus = "unresolved"
+		} else {
+			attributionStatus = "resolved"
+		}
+	}
+	if attributionStatus != "resolved" && attributionStatus != "unresolved" {
+		return nil, ErrViolationInvalidInput
+	}
+	if (attributionStatus == "resolved") != (namespace != nil) {
+		return nil, ErrViolationInvalidInput
 	}
 
 	return &normalizedViolationInput{
-		Namespace:         trimmedNamespace,
+		EventID:           normalizeEventID(req.EventID, namespace, req),
+		Namespace:         namespace,
 		PodName:           strings.TrimSpace(req.PodName),
+		PodUID:            strings.TrimSpace(req.PodUID),
 		ContainerID:       strings.TrimSpace(req.ContainerID),
 		NodeName:          strings.TrimSpace(req.NodeName),
 		PID:               req.PID,
@@ -253,6 +470,13 @@ func normalizeViolationInput(req CreateViolationRequest) (*normalizedViolationIn
 		ProcessCommand:    trimmedProcessCommand,
 		MatchType:         strings.TrimSpace(req.MatchType),
 		MatchRule:         strings.TrimSpace(req.MatchRule),
+		RulesetRevision:   req.RulesetRevision,
+		PrimaryRuleID:     strings.TrimSpace(req.PrimaryRuleID),
+		MatchedRuleIDs:    uniqueTrimmed(req.MatchedRuleIDs),
+		Severity:          strings.TrimSpace(req.Severity),
+		RuleAction:        strings.TrimSpace(req.RuleAction),
+		AttributionStatus: attributionStatus,
+		AttributionReason: strings.TrimSpace(req.AttributionReason),
 		Message:           trimmedMessage,
 		IsIllegal:         isIllegal,
 		LabelActionStatus: strings.TrimSpace(req.LabelActionStatus),
@@ -260,6 +484,86 @@ func normalizeViolationInput(req CreateViolationRequest) (*normalizedViolationIn
 		DetectedAt:        req.DetectedAt,
 		RawPayload:        req.RawPayload,
 	}, nil
+}
+
+func uniqueTrimmed(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !slices.Contains(result, value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func normalizedInputFromEvent(violation *ProcscanViolationEvent) *normalizedViolationInput {
+	if violation == nil {
+		return nil
+	}
+
+	attributionStatus := strings.TrimSpace(violation.AttributionStatus)
+	if attributionStatus == "" {
+		if violation.Namespace == nil {
+			attributionStatus = "unresolved"
+		} else {
+			attributionStatus = "resolved"
+		}
+	}
+
+	return &normalizedViolationInput{
+		EventID:           stringValue(violation.EventID),
+		Namespace:         violation.Namespace,
+		PodName:           strings.TrimSpace(violation.PodName),
+		PodUID:            strings.TrimSpace(violation.PodUID),
+		ContainerID:       strings.TrimSpace(violation.ContainerID),
+		NodeName:          strings.TrimSpace(violation.NodeName),
+		PID:               violation.PID,
+		ProcessName:       strings.TrimSpace(violation.ProcessName),
+		ProcessCommand:    strings.TrimSpace(violation.ProcessCommand),
+		MatchType:         strings.TrimSpace(violation.MatchType),
+		MatchRule:         strings.TrimSpace(violation.MatchRule),
+		RulesetRevision:   violation.RulesetRevision,
+		PrimaryRuleID:     strings.TrimSpace(violation.PrimaryRuleID),
+		MatchedRuleIDs:    parseStringSlice(violation.MatchedRuleIDs),
+		Severity:          strings.TrimSpace(violation.Severity),
+		RuleAction:        strings.TrimSpace(violation.RuleAction),
+		AttributionStatus: attributionStatus,
+		AttributionReason: strings.TrimSpace(violation.AttributionReason),
+		Message:           strings.TrimSpace(violation.Message),
+		IsIllegal:         violation.IsIllegal,
+		LabelActionStatus: strings.TrimSpace(violation.LabelActionStatus),
+		LabelActionResult: strings.TrimSpace(violation.LabelActionResult),
+		DetectedAt:        violation.DetectedAt,
+		RawPayload:        parseRawPayload(violation.RawPayload),
+	}
+}
+
+func normalizeEventID(value string, namespace *string, req CreateViolationRequest) string {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed
+	}
+
+	namespaceValue := ""
+	if namespace != nil {
+		namespaceValue = *namespace
+	}
+	fingerprint := strings.Join([]string{
+		namespaceValue,
+		strings.TrimSpace(req.PodName),
+		strings.TrimSpace(req.PodUID),
+		strings.TrimSpace(req.ContainerID),
+		strings.TrimSpace(req.NodeName),
+		strconv.Itoa(req.PID),
+		strings.TrimSpace(req.ProcessName),
+		strings.TrimSpace(req.ProcessCommand),
+		strconv.FormatUint(req.RulesetRevision, 10),
+		strings.TrimSpace(req.PrimaryRuleID),
+		strings.TrimSpace(req.MatchRule),
+		req.DetectedAt.UTC().Format(time.RFC3339Nano),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(fingerprint))
+	return hex.EncodeToString(sum[:])
 }
 
 func validateNamespace(namespace string) error {
@@ -296,6 +600,26 @@ func marshalRawPayload(payload json.RawMessage) (*string, error) {
 	return &result, nil
 }
 
+func marshalStringSlice(values []string) (*string, error) {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil, ErrViolationInvalidInput
+	}
+	value := string(data)
+	return &value, nil
+}
+
+func parseStringSlice(raw *string) []string {
+	if raw == nil || *raw == "" {
+		return []string{}
+	}
+	values := []string{}
+	if err := json.Unmarshal([]byte(*raw), &values); err != nil {
+		return []string{}
+	}
+	return values
+}
+
 func parseRawPayload(raw *string) json.RawMessage {
 	if raw == nil || *raw == "" {
 		return nil
@@ -304,57 +628,9 @@ func parseRawPayload(raw *string) json.RawMessage {
 	return json.RawMessage(*raw)
 }
 
-func readIsIllegalFromRawPayload(payload json.RawMessage) (bool, bool) {
-	if len(payload) == 0 || !json.Valid(payload) {
-		return false, false
-	}
-
-	var raw map[string]any
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return false, false
-	}
-
-	if processInfo, ok := raw["进程信息"].(map[string]any); ok {
-		if value, ok := readBool(processInfo["是否违规"]); ok {
-			return value, true
-		}
-	}
-
-	if processInfo, ok := raw["process_info"].(map[string]any); ok {
-		if value, ok := readBool(processInfo["IsIllegal"]); ok {
-			return value, true
-		}
-
-		if value, ok := readBool(processInfo["is_illegal"]); ok {
-			return value, true
-		}
-	}
-
-	if value, ok := readBool(raw["is_illegal"]); ok {
-		return value, true
-	}
-
-	if value, ok := readBool(raw["IsIllegal"]); ok {
-		return value, true
-	}
-
-	return false, false
-}
-
-func readBool(value any) (bool, bool) {
-	if boolValue, ok := value.(bool); ok {
-		return boolValue, true
-	}
-	return false, false
-}
-
 func isEffectiveViolation(violation *ProcscanViolationEvent) bool {
 	if violation == nil {
 		return false
-	}
-
-	if rawIsIllegal, ok := readIsIllegalFromRawPayload(parseRawPayload(violation.RawPayload)); ok {
-		return rawIsIllegal
 	}
 
 	return violation.IsIllegal
@@ -363,8 +639,10 @@ func isEffectiveViolation(violation *ProcscanViolationEvent) bool {
 func toViolationResponse(violation *ProcscanViolationEvent) *ViolationResponse {
 	return &ViolationResponse{
 		ID:                violation.ID,
+		EventID:           stringValue(violation.EventID),
 		Namespace:         violation.Namespace,
 		PodName:           violation.PodName,
+		PodUID:            violation.PodUID,
 		ContainerID:       violation.ContainerID,
 		NodeName:          violation.NodeName,
 		PID:               violation.PID,
@@ -372,6 +650,15 @@ func toViolationResponse(violation *ProcscanViolationEvent) *ViolationResponse {
 		ProcessCommand:    violation.ProcessCommand,
 		MatchType:         violation.MatchType,
 		MatchRule:         violation.MatchRule,
+		RulesetRevision:   violation.RulesetRevision,
+		PrimaryRuleID:     violation.PrimaryRuleID,
+		MatchedRuleIDs:    parseStringSlice(violation.MatchedRuleIDs),
+		Severity:          violation.Severity,
+		RuleAction:        violation.RuleAction,
+		AttributionStatus: violation.AttributionStatus,
+		AttributionReason: violation.AttributionReason,
+		AutobanStatus:     violation.AutobanStatus,
+		AutobanReason:     violation.AutobanReason,
 		Message:           violation.Message,
 		IsIllegal:         isEffectiveViolation(violation),
 		LabelActionStatus: violation.LabelActionStatus,
@@ -381,4 +668,18 @@ func toViolationResponse(violation *ProcscanViolationEvent) *ViolationResponse {
 		CreatedAt:         violation.CreatedAt,
 		UpdatedAt:         violation.UpdatedAt,
 	}
+}
+
+func stringPointer(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

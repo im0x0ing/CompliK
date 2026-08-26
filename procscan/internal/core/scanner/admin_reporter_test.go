@@ -72,7 +72,7 @@ func TestProcscanEventIDUsesProcessStartTimeForDeduplication(t *testing.T) {
 	}
 }
 
-func TestProcscanEventIDFallsBackToDetectedTimeWithoutProcessStartTime(t *testing.T) {
+func TestProcscanEventIDStableWithoutProcessStartTime(t *testing.T) {
 	info := &models.ProcessInfo{
 		PID:             42,
 		ProcessName:     "xmrig",
@@ -83,8 +83,13 @@ func TestProcscanEventIDFallsBackToDetectedTimeWithoutProcessStartTime(t *testin
 	}
 	first := procscanEventID(info, "node-a", time.Date(2026, 8, 16, 10, 0, 0, 0, time.UTC))
 	second := procscanEventID(info, "node-a", time.Date(2026, 8, 16, 10, 5, 0, 0, time.UTC))
-	if first == second {
-		t.Fatal("event ID did not change when detected time changed without process start time")
+	if first != second {
+		t.Fatalf("event ID changed across scans: %q != %q", first, second)
+	}
+
+	info.Command = "xmrig --url pool2"
+	if changed := procscanEventID(info, "node-a", time.Now().UTC()); changed == first {
+		t.Fatal("event ID did not change when command changed")
 	}
 }
 
