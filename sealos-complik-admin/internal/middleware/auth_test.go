@@ -16,6 +16,8 @@ func TestRoleBasedBasicAuthLimitsProcscanIdentity(t *testing.T) {
 		config.AuthConfig{Enabled: true, Username: "admin", Password: "admin-password"},
 		config.AuthConfig{Enabled: true, Username: "procscan", Password: "procscan-password"},
 	))
+	router.GET("/ready", func(c *gin.Context) { c.Status(http.StatusOK) })
+	router.GET("/health", func(c *gin.Context) { c.Status(http.StatusOK) })
 	router.GET("/api/procscan/rules", func(c *gin.Context) { c.Status(http.StatusOK) })
 	router.PUT("/api/procscan/rules", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	router.POST("/api/procscan-violations", func(c *gin.Context) { c.Status(http.StatusCreated) })
@@ -33,12 +35,16 @@ func TestRoleBasedBasicAuthLimitsProcscanIdentity(t *testing.T) {
 		{name: "procscan cannot write rules", method: http.MethodPut, path: "/api/procscan/rules", username: "procscan", password: "procscan-password", wantStatus: http.StatusForbidden},
 		{name: "admin writes rules", method: http.MethodPut, path: "/api/procscan/rules", username: "admin", password: "admin-password", wantStatus: http.StatusNoContent},
 		{name: "unknown identity rejected", method: http.MethodGet, path: "/api/procscan/rules", username: "unknown", password: "bad", wantStatus: http.StatusUnauthorized},
+		{name: "readiness probe is public", method: http.MethodGet, path: "/ready", wantStatus: http.StatusOK},
+		{name: "health probe is public", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.path, nil)
-			req.SetBasicAuth(tc.username, tc.password)
+			if tc.username != "" || tc.password != "" {
+				req.SetBasicAuth(tc.username, tc.password)
+			}
 			resp := httptest.NewRecorder()
 			router.ServeHTTP(resp, req)
 			if resp.Code != tc.wantStatus {

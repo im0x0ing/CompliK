@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -25,6 +26,7 @@ import (
 func InitRouter(cfg *config.Config) (*gin.Engine, error) {
 	g := gin.Default()
 	g.GET("/health", HealthCheck)
+	g.GET("/ready", HealthCheck)
 
 	if cfg.Auth.Enabled {
 		if strings.TrimSpace(cfg.Auth.Username) == "" ||
@@ -32,7 +34,7 @@ func InitRouter(cfg *config.Config) (*gin.Engine, error) {
 			return nil, errors.New("basic auth username and password are required")
 		}
 
-		g.Use(middleware.BasicAuth(cfg.Auth))
+		g.Use(middleware.RoleBasedBasicAuth(cfg.Auth, cfg.ProcscanAuth))
 	}
 
 	locker := buildNamespaceLocker()

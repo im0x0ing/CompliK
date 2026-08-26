@@ -33,6 +33,10 @@ type namespaceLocker struct {
 
 type noopNamespaceLocker struct{}
 
+func NewNoopNamespaceLocker() NamespaceLocker {
+	return noopNamespaceLocker{}
+}
+
 func NewNamespaceLocker() (NamespaceLocker, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -137,4 +141,12 @@ func loadConfig() (*rest.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (noopNamespaceLocker) EnsureLocked(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (noopNamespaceLocker) EnsureUnlocked(context.Context, string) (bool, error) {
+	return false, nil
 }
