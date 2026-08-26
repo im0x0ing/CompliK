@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"sealos-complik-admin/internal/infra/k8s"
 	"sealos-complik-admin/internal/modules/pagequery"
 )
 
@@ -39,6 +38,22 @@ func (f *fakeBanRepository) DeleteBanByID(ctx context.Context, id uint64) error 
 	return nil
 }
 
+func (f *fakeBanRepository) UpdateBanLabelAction(
+	_ context.Context,
+	id uint64,
+	status string,
+	result string,
+) error {
+	for _, ban := range f.created {
+		if ban.ID == id {
+			ban.LabelActionStatus = status
+			ban.LabelActionResult = result
+			return nil
+		}
+	}
+	return nil
+}
+
 func (f *fakeBanRepository) GetBansByNamespace(context.Context, string) ([]Ban, error) {
 	return nil, nil
 }
@@ -60,6 +75,27 @@ func (f *fakeBanRepository) HasActiveBan(context.Context, string, time.Time) (bo
 	return false, nil
 }
 
+func (f *fakeBanRepository) ListRetryableLabelBans(
+	_ context.Context,
+	_ time.Time,
+	limit int,
+) ([]Ban, error) {
+	retryable := make([]Ban, 0)
+	for _, ban := range f.created {
+		if ban.LabelActionStatus != LabelActionPending &&
+			ban.LabelActionStatus != LabelActionFailed &&
+			ban.LabelActionStatus != "" {
+			continue
+		}
+		retryable = append(retryable, *ban)
+		if limit > 0 && len(retryable) >= limit {
+			break
+		}
+	}
+
+	return retryable, nil
+}
+
 type failingNamespaceLocker struct {
 	called bool
 }
@@ -73,7 +109,70 @@ func (l *failingNamespaceLocker) EnsureUnlocked(context.Context, string) (bool, 
 	return false, nil
 }
 
-func TestCreateBanRollsBackRecordWhenLabelFails(t *testing.T) {
+type recordingNamespaceLocker struct {
+	locked []string
+}
+
+func (l *recordingNamespaceLocker) EnsureLocked(_ context.Context, namespace string) (bool, error) {
+	l.locked = append(l.locked, namespace)
+	return true, nil
+}
+
+func (l *recordingNamespaceLocker) EnsureUnlocked(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func TestReconcilePendingLabelsRetriesFailedBans(t *testing.T) {
+	repo := &fakeBanRepository{
+		created: []*Ban{{
+			ID:                7,
+			Namespace:         "ns-demo",
+			LabelActionStatus: LabelActionFailed,
+		}},
+	}
+	locker := &recordingNamespaceLocker{}
+	svc := NewService(repo, nil, "", locker)
+	svc.now = func() time.Time { return time.Date(2026, time.August, 21, 8, 0, 0, 0, time.UTC) }
+
+	if err := svc.ReconcilePendingLabels(context.Background(), 10); err != nil {
+		t.Fatalf("ReconcilePendingLabels() error = %v", err)
+	}
+
+	if len(locker.locked) != 1 || locker.locked[0] != "ns-demo" {
+		t.Fatalf("locked namespaces = %v, want [ns-demo]", locker.locked)
+	}
+	if repo.created[0].LabelActionStatus != LabelActionApplied {
+		t.Fatalf("label action status = %q, want %q", repo.created[0].LabelActionStatus, LabelActionApplied)
+	}
+}
+
+func TestReconcilePendingLabelsSkipsAppliedBans(t *testing.T) {
+	repo := &fakeBanRepository{
+		created: []*Ban{{
+			ID:                8,
+			Namespace:         "ns-demo",
+			LabelActionStatus: LabelActionApplied,
+		}},
+	}
+	locker := &recordingNamespaceLocker{}
+	svc := NewService(repo, nil, "", locker)
+
+	if err := svc.ReconcilePendingLabels(context.Background(), 10); err != nil {
+		t.Fatalf("ReconcilePendingLabels() error = %v", err)
+	}
+	if len(locker.locked) != 0 {
+		t.Fatalf("locked namespaces = %v, want none", locker.locked)
+	}
+}
+
+func TestReconcilePendingLabelsFailsClosedWithoutLocker(t *testing.T) {
+	svc := NewService(&fakeBanRepository{}, nil, "", nil)
+	if err := svc.ReconcilePendingLabels(context.Background(), 10); !errors.Is(err, ErrNamespaceLockerUnavailable) {
+		t.Fatalf("ReconcilePendingLabels() error = %v, want locker error", err)
+	}
+}
+
+func TestCreateBanPreservesRecordWhenLabelFails(t *testing.T) {
 	repo := &fakeBanRepository{}
 	locker := &failingNamespaceLocker{}
 	svc := NewService(repo, nil, "", locker)
@@ -93,17 +192,32 @@ func TestCreateBanRollsBackRecordWhenLabelFails(t *testing.T) {
 		t.Fatal("expected namespace locker to be called")
 	}
 
-	if len(repo.created) != 0 {
-		t.Fatalf("expected ban record to be rolled back, got %d", len(repo.created))
+	if len(repo.created) != 1 {
+		t.Fatalf("expected failed ban record to be preserved, got %d", len(repo.created))
 	}
 
-	if len(repo.deletedIDs) != 1 {
-		t.Fatalf("expected 1 rollback delete, got %d", len(repo.deletedIDs))
+	if repo.created[0].LabelActionStatus != LabelActionFailed {
+		t.Fatalf("label action status = %q, want %q", repo.created[0].LabelActionStatus, LabelActionFailed)
 	}
-
-	if repo.deletedIDs[0] != 1 {
-		t.Fatalf("unexpected rollback delete id: %d", repo.deletedIDs[0])
+	if len(repo.deletedIDs) != 0 {
+		t.Fatalf("expected no rollback delete, got %d", len(repo.deletedIDs))
 	}
 }
 
-var _ k8s.NamespaceLocker = (*failingNamespaceLocker)(nil)
+func TestCreateBanFailsClosedWithoutNamespaceLocker(t *testing.T) {
+	repo := &fakeBanRepository{}
+	svc := NewService(repo, nil, "", nil)
+
+	err := svc.CreateBan(context.Background(), CreateBanRequest{
+		Namespace:    "demo-ns",
+		Reason:       "manual ban",
+		BanStartTime: time.Now(),
+		OperatorName: "admin",
+	})
+	if !errors.Is(err, ErrNamespaceLockerUnavailable) {
+		t.Fatalf("CreateBan() error = %v, want namespace locker error", err)
+	}
+	if len(repo.created) != 0 {
+		t.Fatalf("expected no ban record without locker, got %d", len(repo.created))
+	}
+}

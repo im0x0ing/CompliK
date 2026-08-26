@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"sealos-complik-admin/internal/modules/pagequery"
 )
 
@@ -32,6 +33,82 @@ func NewRepository(db *gorm.DB) *Repository {
 // CreateBan creates a new ban record.
 func (r *Repository) CreateBan(ctx context.Context, ban *Ban) error {
 	return r.db.WithContext(ctx).Create(ban).Error
+}
+
+func (r *Repository) UpdateBanLabelAction(
+	ctx context.Context,
+	id uint64,
+	status string,
+	result string,
+) error {
+	return r.db.WithContext(ctx).Model(&Ban{}).
+		Where("id = ?", id).
+		Updates(map[string]any{
+			"label_action_status": status,
+			"label_action_result": result,
+		}).Error
+}
+
+// CreateBanIfAbsent atomically creates a ban when the namespace is not
+// currently banned. A persistent lock row makes the check safe even when the
+// namespace has no existing ban or unban records.
+func (r *Repository) CreateBanIfAbsent(ctx context.Context, ban *Ban, now time.Time) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("ban database is required")
+	}
+
+	created := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		lock := &BanNamespaceLock{Namespace: ban.Namespace}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "namespace"}},
+			DoNothing: true,
+		}).Create(lock).Error; err != nil {
+			return err
+		}
+
+		var locked BanNamespaceLock
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("namespace = ?", ban.Namespace).
+			First(&locked).Error; err != nil {
+			return err
+		}
+
+		active, err := hasActiveBan(tx, ban.Namespace, now)
+		if err != nil {
+			return err
+		}
+		if active {
+			var current Ban
+			action, err := getLatestBanStatusAction(tx, ban.Namespace, now)
+			if err != nil {
+				return err
+			}
+			if action.Kind != banStatusActionBan {
+				return nil
+			}
+			if err := tx.Where("id = ?", action.ID).First(&current).Error; err != nil {
+				return err
+			}
+			if current.LabelActionStatus != LabelActionPending &&
+				current.LabelActionStatus != LabelActionFailed &&
+				current.LabelActionStatus != "" {
+				return nil
+			}
+			*ban = current
+			created = true
+			return nil
+		}
+
+		ban.LabelActionStatus = LabelActionPending
+		if err := tx.Create(ban).Error; err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+
+	return created, err
 }
 
 // GetBansByNamespace returns all ban records for the given namespace.
@@ -130,7 +207,63 @@ func (r *Repository) HasActiveBan(
 	namespace string,
 	now time.Time,
 ) (bool, error) {
-	action, err := r.getLatestBanStatusAction(ctx, namespace, now)
+	return hasActiveBan(r.db.WithContext(ctx), namespace, now)
+}
+
+func (r *Repository) ListRetryableLabelBans(
+	ctx context.Context,
+	now time.Time,
+	limit int,
+) ([]Ban, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("ban database is required")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var candidates []Ban
+	if err := r.db.WithContext(ctx).
+		Where(
+			"label_action_status IN ? OR COALESCE(label_action_status, '') = ''",
+			[]string{LabelActionPending, LabelActionFailed},
+		).
+		Order("id ASC").
+		Limit(limit * 4).
+		Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+
+	retryable := make([]Ban, 0, limit)
+	for i := range candidates {
+		ban := candidates[i]
+		active, err := hasActiveBan(r.db.WithContext(ctx), ban.Namespace, now)
+		if err != nil {
+			return nil, err
+		}
+		if !active {
+			continue
+		}
+
+		action, err := getLatestBanStatusAction(r.db.WithContext(ctx), ban.Namespace, now)
+		if err != nil {
+			return nil, err
+		}
+		if action.Kind != banStatusActionBan || action.ID != ban.ID {
+			continue
+		}
+
+		retryable = append(retryable, ban)
+		if len(retryable) >= limit {
+			break
+		}
+	}
+
+	return retryable, nil
+}
+
+func hasActiveBan(db *gorm.DB, namespace string, now time.Time) (bool, error) {
+	action, err := getLatestBanStatusAction(db, namespace, now)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, nil
@@ -147,8 +280,16 @@ func (r *Repository) getLatestBanStatusAction(
 	namespace string,
 	now time.Time,
 ) (*banStatusAction, error) {
+	return getLatestBanStatusAction(r.db.WithContext(ctx), namespace, now)
+}
+
+func getLatestBanStatusAction(
+	db *gorm.DB,
+	namespace string,
+	now time.Time,
+) (*banStatusAction, error) {
 	var action banStatusAction
-	if err := r.db.WithContext(ctx).
+	if err := db.
 		Raw(`
 SELECT kind, id, created_at
 FROM (

@@ -59,6 +59,8 @@ func InitRouter(cfg *config.Config) (*gin.Engine, error) {
 		return nil, fmt.Errorf("init unban routes: %w", err)
 	}
 
+	banService.StartLabelReconciler(context.Background(), 0)
+
 	return g, nil
 }
 

@@ -22,7 +22,8 @@ var (
 	ErrBanInvalidFile  = errors.New(
 		"only png, jpg, jpeg, webp, and gif screenshots are supported",
 	)
-	ErrBanUploadDisabled = errors.New("ban screenshot upload is disabled: oss is not configured")
+	ErrBanUploadDisabled          = errors.New("ban screenshot upload is disabled: oss is not configured")
+	ErrNamespaceLockerUnavailable = errors.New("namespace locker is not configured")
 )
 
 const (
@@ -49,6 +50,15 @@ type BanRepository interface {
 		operatorName string,
 	) ([]Ban, int64, error)
 	HasActiveBan(ctx context.Context, namespace string, now time.Time) (bool, error)
+	ListRetryableLabelBans(ctx context.Context, now time.Time, limit int) ([]Ban, error)
+}
+
+type idempotentBanRepository interface {
+	CreateBanIfAbsent(ctx context.Context, ban *Ban, now time.Time) (bool, error)
+}
+
+type banLabelActionRepository interface {
+	UpdateBanLabelAction(ctx context.Context, id uint64, status string, result string) error
 }
 
 func NewService(
@@ -76,6 +86,54 @@ func (s *Service) CreateBan(ctx context.Context, req CreateBanRequest) error {
 	return s.createBan(ctx, req, nil)
 }
 
+// CreateBanIfAbsent is used by automated decisions. It is safe against
+// concurrent events for the same namespace.
+func (s *Service) CreateBanIfAbsent(ctx context.Context, req CreateBanRequest) (bool, error) {
+	if s.locker == nil {
+		return false, ErrNamespaceLockerUnavailable
+	}
+
+	input, err := normalizeBanInput(
+		req.Namespace,
+		req.Reason,
+		req.BanStartTime,
+		req.BanEndTime,
+		req.OperatorName,
+		req.ScreenshotURLs,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	ban := &Ban{
+		Namespace:         input.Namespace,
+		Reason:            input.Reason,
+		ScreenshotURLs:    append(StringList(nil), input.ScreenshotURLs...),
+		BanStartTime:      input.BanStartTime,
+		BanEndTime:        input.BanEndTime,
+		OperatorName:      input.OperatorName,
+		LabelActionStatus: LabelActionPending,
+	}
+	repository, ok := s.repository.(idempotentBanRepository)
+	if !ok {
+		return false, errors.New("idempotent ban repository is required")
+	}
+
+	created, err := repository.CreateBanIfAbsent(ctx, ban, s.now().UTC())
+	if err != nil {
+		return false, translateRepositoryError(err)
+	}
+	if !created {
+		return false, nil
+	}
+
+	if err := s.applyNamespaceLabel(ctx, ban.ID, input.Namespace); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // UploadBan creates a new ban record and uploads screenshots to OSS.
 func (s *Service) UploadBan(
 	ctx context.Context,
@@ -90,6 +148,10 @@ func (s *Service) createBan(
 	req CreateBanRequest,
 	screenshots []*multipart.FileHeader,
 ) (err error) {
+	if s.locker == nil {
+		return ErrNamespaceLockerUnavailable
+	}
+
 	input, err := normalizeBanInput(
 		req.Namespace,
 		req.Reason,
@@ -113,12 +175,13 @@ func (s *Service) createBan(
 	}
 
 	ban := &Ban{
-		Namespace:      input.Namespace,
-		Reason:         input.Reason,
-		ScreenshotURLs: screenshotURLs,
-		BanStartTime:   input.BanStartTime,
-		BanEndTime:     input.BanEndTime,
-		OperatorName:   input.OperatorName,
+		Namespace:         input.Namespace,
+		Reason:            input.Reason,
+		ScreenshotURLs:    screenshotURLs,
+		BanStartTime:      input.BanStartTime,
+		BanEndTime:        input.BanEndTime,
+		OperatorName:      input.OperatorName,
+		LabelActionStatus: LabelActionPending,
 	}
 
 	if err = s.repository.CreateBan(ctx, ban); err != nil {
@@ -126,23 +189,94 @@ func (s *Service) createBan(
 		return err
 	}
 
-	if s.locker != nil {
-		if _, err = s.locker.EnsureLocked(ctx, input.Namespace); err != nil {
-			log.Printf("ban namespace label failed for %s: %v", input.Namespace, err)
+	return s.applyNamespaceLabel(ctx, ban.ID, input.Namespace)
+}
 
-			if rollbackErr := s.repository.DeleteBanByID(ctx, ban.ID); rollbackErr != nil {
-				log.Printf(
-					"ban rollback failed for namespace %s: %v",
-					input.Namespace,
-					rollbackErr,
-				)
-			}
+const (
+	defaultLabelReconcileInterval = 30 * time.Second
+	defaultLabelReconcileLimit    = 50
+)
 
-			return err
+func (s *Service) applyNamespaceLabel(ctx context.Context, id uint64, namespace string) error {
+	if s.locker == nil {
+		return ErrNamespaceLockerUnavailable
+	}
+
+	if _, err := s.locker.EnsureLocked(ctx, namespace); err != nil {
+		log.Printf("ban namespace label failed for %s: %v", namespace, err)
+		if statusErr := s.updateLabelAction(ctx, id, LabelActionFailed, err.Error()); statusErr != nil {
+			log.Printf("ban label status update failed for %s: %v", namespace, statusErr)
+		}
+		return err
+	}
+
+	return s.updateLabelAction(ctx, id, LabelActionApplied, "namespace label applied")
+}
+
+func (s *Service) updateLabelAction(ctx context.Context, id uint64, status, result string) error {
+	statusRepository, ok := s.repository.(banLabelActionRepository)
+	if !ok {
+		return nil
+	}
+
+	return statusRepository.UpdateBanLabelAction(ctx, id, status, result)
+}
+
+// ReconcilePendingLabels retries namespace labels for active bans that are
+// still pending or failed, without waiting for another procscan event.
+func (s *Service) ReconcilePendingLabels(ctx context.Context, limit int) error {
+	if s == nil || s.locker == nil {
+		return ErrNamespaceLockerUnavailable
+	}
+	if limit <= 0 {
+		limit = defaultLabelReconcileLimit
+	}
+
+	bans, err := s.repository.ListRetryableLabelBans(ctx, s.now().UTC(), limit)
+	if err != nil {
+		return translateRepositoryError(err)
+	}
+
+	var errs []error
+	for i := range bans {
+		if err := s.applyNamespaceLabel(ctx, bans[i].ID, bans[i].Namespace); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
+}
+
+// StartLabelReconciler retries pending or failed namespace labels until ctx ends.
+func (s *Service) StartLabelReconciler(ctx context.Context, interval time.Duration) {
+	if s == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultLabelReconcileInterval
+	}
+
+	go s.runLabelReconciler(ctx, interval)
+}
+
+func (s *Service) runLabelReconciler(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	if err := s.ReconcilePendingLabels(ctx, defaultLabelReconcileLimit); err != nil {
+		log.Printf("ban label reconciler: %v", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.ReconcilePendingLabels(ctx, defaultLabelReconcileLimit); err != nil {
+				log.Printf("ban label reconciler: %v", err)
+			}
+		}
+	}
 }
 
 // DeleteBanByID deletes a single ban record by id.
@@ -212,8 +346,6 @@ func (s *Service) ListBansPage(
 
 	return &response, nil
 }
-
-// GetBanStatus returns whether the given namespace is currently banned.
 func (s *Service) GetBanStatus(ctx context.Context, namespace string) (*BanStatusResponse, error) {
 	if err := validateNamespace(namespace); err != nil {
 		return nil, err
