@@ -44,11 +44,17 @@ type AuthConfig struct {
 	Realm    string `yaml:"realm"`
 }
 
+type ProcscanRulesConfig struct {
+	V2WritesEnabled bool `yaml:"v2_writes_enabled"`
+}
+
 type Config struct {
-	Port     int            `yaml:"port"`
-	Database DatabaseConfig `yaml:"database"`
-	OSS      OSSConfig      `yaml:"oss"`
-	Auth     AuthConfig     `yaml:"auth"`
+	Port          int                 `yaml:"port"`
+	Database      DatabaseConfig      `yaml:"database"`
+	OSS           OSSConfig           `yaml:"oss"`
+	Auth          AuthConfig          `yaml:"auth"`
+	ProcscanAuth  AuthConfig          `yaml:"procscan_auth"`
+	ProcscanRules ProcscanRulesConfig `yaml:"procscan_rules"`
 }
 
 // LoadConfig loads the configuration from the specified YAML file and environment variables.
@@ -104,6 +110,32 @@ func applyEnvOverrides(cfg *Config) {
 
 	applyDatabaseEnvOverrides(cfg)
 	applyAuthEnvOverrides(cfg)
+	applyProcscanEnvOverrides(cfg)
+}
+
+func applyProcscanEnvOverrides(cfg *Config) {
+	if value := strings.TrimSpace(os.Getenv("PROCSCAN_BASIC_AUTH_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			log.Printf("parse PROCSCAN_BASIC_AUTH_ENABLED failed: %v", err)
+		} else {
+			cfg.ProcscanAuth.Enabled = enabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("PROCSCAN_BASIC_AUTH_USERNAME")); value != "" {
+		cfg.ProcscanAuth.Username = value
+	}
+	if value, ok := os.LookupEnv("PROCSCAN_BASIC_AUTH_PASSWORD"); ok {
+		cfg.ProcscanAuth.Password = strings.TrimSpace(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("PROCSCAN_RULES_V2_WRITES_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			log.Printf("parse PROCSCAN_RULES_V2_WRITES_ENABLED failed: %v", err)
+		} else {
+			cfg.ProcscanRules.V2WritesEnabled = enabled
+		}
+	}
 }
 
 func applyDatabaseEnvOverrides(cfg *Config) {

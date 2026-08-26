@@ -16,6 +16,7 @@ import (
 	"sealos-complik-admin/internal/modules/commitment"
 	"sealos-complik-admin/internal/modules/complikviolation"
 	"sealos-complik-admin/internal/modules/discoveredpath"
+	"sealos-complik-admin/internal/modules/procscanrule"
 	"sealos-complik-admin/internal/modules/procscanviolation"
 	"sealos-complik-admin/internal/modules/projectconfig"
 	"sealos-complik-admin/internal/modules/unban"
@@ -51,6 +52,7 @@ func InitRouter(cfg *config.Config) (*gin.Engine, error) {
 	}
 
 	projectconfig.InitProjectConfigRoutes(g)
+	procscanrule.InitRoutes(g, cfg.ProcscanRules)
 	procscanviolation.InitRoutes(g, autobanService)
 
 	if _, err := unban.InitUnbanRoutes(g, locker); err != nil {

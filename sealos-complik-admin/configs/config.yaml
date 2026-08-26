@@ -17,6 +17,12 @@ auth:
   password: changeme
   realm: CompliK Admin
 
+procscan_auth:
+  enabled: false
+
+procscan_rules:
+  v2_writes_enabled: false
+
 oss:
   endpoint: oss-cn-hangzhou.aliyuncs.com
   bucket: your-bucket-name
