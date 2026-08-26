@@ -243,6 +243,60 @@ export type DiscoveredListQuery = {
   host?: string;
 };
 
+export type AutobanSourcePolicy = {
+  enabled: boolean;
+};
+
+export type AutobanPolicy = {
+  enabled: boolean;
+  dryRun: boolean;
+  operatorName: string;
+  reasonPrefix: string;
+  sources: {
+    complik: AutobanSourcePolicy;
+    procscan: AutobanSourcePolicy;
+  };
+  processNameAllowlist: string[];
+  processNameDenylist: string[];
+  namespaceAllowlist: string[];
+  namespaceDenylist: string[];
+};
+
+export type AutobanPolicyRecord = {
+  policy: AutobanPolicy;
+  exists: boolean;
+  updatedAt?: string;
+};
+
+export type ProcscanRuleSeverity = "high" | "critical";
+
+export type ProcscanRule = {
+  id: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  match_type: "process_name" | "command_keyword";
+  pattern: string;
+  severity: "low" | "medium" | ProcscanRuleSeverity;
+  action: "alert" | "ban";
+};
+
+export type ProcscanRuleSet = {
+  schema_version: number;
+  ruleset_revision: number;
+  rules: ProcscanRule[];
+  exemptions: {
+    processes: string[];
+    commands: string[];
+    namespaces: string[];
+    pod_names: string[];
+  };
+};
+
+export type ProcscanRulesStatus = {
+  v2_writes_enabled: boolean;
+};
+
 export type AppDataContextValue = {
   isLoading: boolean;
   error: string | null;

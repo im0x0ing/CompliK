@@ -18,6 +18,9 @@ import type {
   UnbanRecord,
   ViolationListQuery,
   ViolationRecord,
+  AutobanPolicy,
+  AutobanPolicyRecord,
+  ProcscanRuleSet,
 } from "../types";
 
 type ApiErrorPayload = {
@@ -200,6 +203,160 @@ function buildDiscoveredListParams(query: DiscoveredListQuery) {
   return params;
 }
 
+export class ApiRequestError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
+const autobanPolicyConfigName = "autoban_policy";
+const autobanPolicyConfigType = "autoban_policy";
+
+export async function loadProcscanRuleSet(): Promise<ProcscanRuleSet> {
+  return request<ProcscanRuleSet>("/api/procscan/rules");
+}
+
+export async function loadProcscanRulesStatus(): Promise<boolean> {
+  const data = await request<{ v2_writes_enabled: boolean }>("/api/procscan/rules/status");
+  return data.v2_writes_enabled;
+}
+
+export async function validateProcscanRuleSet(ruleSet: ProcscanRuleSet) {
+  await request("/api/procscan/rules/validate", {
+    method: "POST",
+    body: JSON.stringify({
+      schema_version: ruleSet.schema_version,
+      rules: ruleSet.rules,
+      exemptions: ruleSet.exemptions,
+    }),
+  });
+}
+
+export async function saveProcscanRuleSet(ruleSet: ProcscanRuleSet): Promise<ProcscanRuleSet> {
+  return request<ProcscanRuleSet>("/api/procscan/rules", {
+    method: "PUT",
+    headers: {
+      "If-Match": `"${ruleSet.ruleset_revision}"`,
+    },
+    body: JSON.stringify({
+      schema_version: ruleSet.schema_version,
+      rules: ruleSet.rules,
+      exemptions: ruleSet.exemptions,
+    }),
+  });
+}
+
+export async function loadAutobanPolicy(): Promise<AutobanPolicyRecord> {
+  try {
+    const data = await request<ProjectConfigDto>(`/api/configs/${autobanPolicyConfigName}`);
+    return {
+      policy: normalizeAutobanPolicy(data.config_value),
+      exists: true,
+      updatedAt: formatDateTime(data.updated_at),
+    };
+  } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 404) {
+      return { policy: defaultAutobanPolicy(), exists: false };
+    }
+    throw error;
+  }
+}
+
+export async function saveAutobanPolicy(policy: AutobanPolicy, exists: boolean) {
+  const body = {
+    config_name: autobanPolicyConfigName,
+    config_type: autobanPolicyConfigType,
+    description: "Admin automatic namespace ban policy",
+    config_value: policy,
+  };
+
+  await request(exists ? `/api/configs/${autobanPolicyConfigName}` : "/api/configs", {
+    method: exists ? "PUT" : "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function defaultAutobanPolicy(): AutobanPolicy {
+  return {
+    enabled: false,
+    dryRun: true,
+    operatorName: "system/autoban",
+    reasonPrefix: "Admin auto-ban",
+    sources: {
+      complik: { enabled: false },
+      procscan: { enabled: true },
+    },
+    processNameAllowlist: [],
+    processNameDenylist: [],
+    namespaceAllowlist: [],
+    namespaceDenylist: ["kube-system", "kube-public", "kube-node-lease", "sealos", "block-system"],
+  };
+}
+
+function asStringList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function readAutobanSource(value: unknown) {
+  if (typeof value === "boolean") {
+    return { enabled: value };
+  }
+
+  const record = readRecord(value);
+  return { enabled: record?.enabled === true };
+}
+
+function normalizeAutobanPolicy(value: unknown): AutobanPolicy {
+  const defaults = defaultAutobanPolicy();
+  const record = readRecord(value);
+  if (!record) {
+    return defaults;
+  }
+
+  const sources = readRecord(record.sources);
+  const readPolicyBoolean = (camel: string, snake: string, fallback: boolean) => {
+    if (typeof record[camel] === "boolean") return record[camel] as boolean;
+    if (typeof record[snake] === "boolean") return record[snake] as boolean;
+    return fallback;
+  };
+  const readString = (camel: string, snake: string, fallback: string) => {
+    if (typeof record[camel] === "string") return record[camel] as string;
+    if (typeof record[snake] === "string") return record[snake] as string;
+    return fallback;
+  };
+  const readList = (camel: string, snake: string, fallback: string[] = []) => {
+    if (Array.isArray(record[camel])) return asStringList(record[camel]);
+    if (Array.isArray(record[snake])) return asStringList(record[snake]);
+    return fallback;
+  };
+  return {
+    enabled: record.enabled === true,
+    dryRun: readPolicyBoolean("dryRun", "dry_run", defaults.dryRun),
+    operatorName: readString("operatorName", "operator_name", defaults.operatorName),
+    reasonPrefix: readString("reasonPrefix", "reason_prefix", defaults.reasonPrefix),
+    sources: {
+      complik: readAutobanSource(sources?.complik),
+      procscan: readAutobanSource(sources?.procscan),
+    },
+    processNameAllowlist: readList("processNameAllowlist", "process_name_allowlist"),
+    processNameDenylist: readList("processNameDenylist", "process_name_denylist"),
+    namespaceAllowlist: readList("namespaceAllowlist", "namespace_allowlist"),
+    namespaceDenylist: Object.prototype.hasOwnProperty.call(record, "namespaceDenylist")
+      ? asStringList(record.namespaceDenylist)
+      : Array.isArray(record.namespace_denylist)
+        ? asStringList(record.namespace_denylist)
+        : defaults.namespaceDenylist,
+  };
+}
+
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   const shouldSetJSONContentType = !(init?.body instanceof FormData);
@@ -220,7 +377,10 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
       payload = null;
     }
 
-    throw new Error(payload?.message ?? payload?.error ?? `请求失败: ${response.status}`);
+    throw new ApiRequestError(
+      response.status,
+      payload?.message ?? payload?.error ?? `请求失败: ${response.status}`,
+    );
   }
 
   if (response.status === 204) {

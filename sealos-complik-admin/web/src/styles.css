@@ -1131,6 +1131,227 @@ table {
   display: none;
 }
 
+.autoban-page {
+  display: grid;
+  gap: 24px;
+}
+
+.autoban-policy-bar {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 20px;
+  padding: 16px 0;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.autoban-execution-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.autoban-policy-note {
+  color: var(--color-muted);
+  font: var(--text-small);
+  text-align: right;
+}
+
+.autoban-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 272px);
+  gap: 32px;
+  align-items: start;
+}
+
+.autoban-rules-section,
+.autoban-scope {
+  min-width: 0;
+}
+
+.autoban-scope {
+  display: grid;
+  gap: 12px;
+  padding-left: 32px;
+  border-left: 1px solid var(--color-border);
+}
+
+.autoban-scope-heading {
+  display: grid;
+  gap: 8px;
+}
+
+.autoban-scope-heading h2 {
+  margin: 0;
+  font: var(--text-h2);
+}
+
+.autoban-scope-heading .select {
+  min-height: 36px;
+  padding: 0 10px;
+}
+
+.autoban-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.autoban-section-header h2 {
+  margin: 0;
+  font: var(--text-h2);
+}
+
+.autoban-section-header p {
+  margin: 4px 0 0;
+  color: var(--color-muted);
+}
+
+.autoban-add-rule {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.autoban-add-rule-form {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.autoban-rule-table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--color-border);
+}
+
+.autoban-rule-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+}
+
+.autoban-rule-table th,
+.autoban-rule-table td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.autoban-rule-table th {
+  color: var(--color-muted);
+  font: var(--text-small);
+  font-weight: 600;
+}
+
+.autoban-rule-table th:first-child,
+.autoban-rule-table td:first-child {
+  padding-left: 0;
+}
+
+.autoban-rule-table th:last-child,
+.autoban-rule-table td:last-child {
+  width: 48px;
+  padding-right: 0;
+  text-align: right;
+}
+
+.autoban-delete-rule {
+  color: var(--color-danger);
+}
+
+.scope-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.scope-input-row .input {
+  min-width: 0;
+}
+
+.autoban-protected {
+  display: grid;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font: var(--text-small);
+}
+
+.scope-mode-summary {
+  margin: -4px 0 4px;
+  color: var(--color-muted);
+  font: var(--text-small);
+}
+
+.switch-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-text);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.switch-control input {
+  position: absolute;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  opacity: 0;
+  z-index: 1;
+  cursor: inherit;
+}
+
+.switch-track {
+  display: inline-flex;
+  align-items: center;
+  width: 42px;
+  height: 24px;
+  padding: 3px;
+  border-radius: 999px;
+  background: #94a3b8;
+  pointer-events: none;
+  transition: background-color 0.2s ease;
+}
+
+.switch-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease;
+}
+
+.switch-control input:checked + .switch-track {
+  background: var(--color-brand);
+}
+
+.switch-control input:checked + .switch-track .switch-thumb {
+  transform: translateX(18px);
+}
+
+.switch-control input:focus-visible + .switch-track {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+.switch-control input:disabled + .switch-track,
+.switch-control input:disabled ~ span:last-child {
+  opacity: 0.52;
+}
+
+.switch-control:has(input:disabled) {
+  cursor: not-allowed;
+}
+
 @media (max-width: 1280px) {
   .stat-grid,
   .info-grid {
@@ -1217,5 +1438,48 @@ table {
 
   .quick-links-grid {
     grid-template-columns: 1fr;
+  }
+
+  .autoban-policy-bar,
+  .autoban-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .autoban-policy-note {
+    text-align: left;
+  }
+
+  .autoban-execution-field {
+    display: grid;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .autoban-execution-field .field-label {
+    white-space: nowrap;
+  }
+
+  .autoban-scope {
+    padding: 24px 0 0;
+    border-top: 1px solid var(--color-border);
+    border-left: 0;
+  }
+
+  .autoban-add-rule-form {
+    grid-template-columns: 1fr;
+  }
+
+  .autoban-add-rule-form .autoban-add-rule {
+    justify-content: center;
+  }
+
+  .autoban-rule-table {
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  .autoban-rule-table th:nth-child(2),
+  .autoban-rule-table td:nth-child(2) {
+    width: 132px;
   }
 }
