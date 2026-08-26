@@ -13,11 +13,11 @@ import (
 
 func TestEnsureLockedPatchesNamespaceLabel(t *testing.T) {
 	client := fake.NewSimpleClientset(&corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ns-demo"},
 	})
 	locker := &namespaceLocker{client: client}
 
-	changed, err := locker.EnsureLocked(context.Background(), " demo ")
+	changed, err := locker.EnsureLocked(context.Background(), " ns-demo ")
 	if err != nil {
 		t.Fatalf("EnsureLocked returned error: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestEnsureLockedPatchesNamespaceLabel(t *testing.T) {
 
 	namespace, err := client.CoreV1().
 		Namespaces().
-		Get(context.Background(), "demo", metav1.GetOptions{})
+		Get(context.Background(), "ns-demo", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get namespace: %v", err)
 	}
@@ -38,10 +38,25 @@ func TestEnsureLockedPatchesNamespaceLabel(t *testing.T) {
 	}
 }
 
+func TestEnsureLockedRejectsNonTenantNamespace(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-system"},
+	})
+	locker := &namespaceLocker{client: client}
+
+	changed, err := locker.EnsureLocked(context.Background(), "kube-system")
+	if err == nil {
+		t.Fatal("expected EnsureLocked to reject kube-system")
+	}
+	if changed {
+		t.Fatal("expected no label change for rejected namespace")
+	}
+}
+
 func TestEnsureLockedSkipsAlreadyLockedNamespace(t *testing.T) {
 	client := fake.NewSimpleClientset(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "demo",
+			Name: "ns-demo",
 			Labels: map[string]string{
 				NamespaceLockLabelKey: NamespaceLockLabelValue,
 			},
@@ -49,7 +64,7 @@ func TestEnsureLockedSkipsAlreadyLockedNamespace(t *testing.T) {
 	})
 	locker := &namespaceLocker{client: client}
 
-	changed, err := locker.EnsureLocked(context.Background(), "demo")
+	changed, err := locker.EnsureLocked(context.Background(), "ns-demo")
 	if err != nil {
 		t.Fatalf("EnsureLocked returned error: %v", err)
 	}

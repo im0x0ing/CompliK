@@ -7,23 +7,17 @@ import (
 	"slices"
 	"strings"
 
+	"sealos-complik-admin/internal/infra/k8s"
 	"sealos-complik-admin/internal/modules/projectconfig"
 )
 
 const (
-	policyConfigType      = "autoban_policy"
-	defaultOperatorName   = "system/autoban"
-	defaultReasonPrefix   = "Admin auto-ban"
-	tenantNamespacePrefix = "ns-"
+	policyConfigType    = "autoban_policy"
+	defaultOperatorName = "system/autoban"
+	defaultReasonPrefix = "Admin auto-ban"
 )
 
-var protectedNamespaces = []string{
-	"kube-system",
-	"kube-public",
-	"kube-node-lease",
-	"sealos",
-	"block-system",
-}
+var defaultNamespaceDenylist = append([]string(nil), k8s.ProtectedNamespaces...)
 
 type Policy struct {
 	Enabled              bool
@@ -243,13 +237,7 @@ func trimStrings(values []string) []string {
 
 func (p Policy) allowsNamespace(namespace string) bool {
 	trimmedNamespace := strings.TrimSpace(namespace)
-	if trimmedNamespace == "" {
-		return false
-	}
-	if !strings.HasPrefix(trimmedNamespace, tenantNamespacePrefix) {
-		return false
-	}
-	if slices.Contains(protectedNamespaces, trimmedNamespace) {
+	if !k8s.AllowsTenantNamespaceLock(trimmedNamespace) {
 		return false
 	}
 

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,8 +20,10 @@ import (
 )
 
 const (
-	defaultAdminTimeout = 10 * time.Second
-	adminViolationsPath = "/api/procscan-violations"
+	defaultAdminTimeout     = 10 * time.Second
+	adminViolationsPath     = "/api/procscan-violations"
+	adminReportMaxAttempts  = 3
+	adminReportRetryBackoff = 500 * time.Millisecond
 )
 
 type procscanViolationRequest struct {
@@ -124,7 +127,7 @@ func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.P
 	ctx, cancel := context.WithTimeout(context.Background(), s.adminTimeout())
 	defer cancel()
 
-	return postJSON(ctx, endpoint, payload, s.adminBasicAuth())
+	return postJSONWithRetry(ctx, endpoint, payload, s.adminBasicAuth())
 }
 
 func procscanEventID(processInfo *models.ProcessInfo, nodeName string, detectedAt time.Time) string {
@@ -180,6 +183,56 @@ func (s *Scanner) adminBasicAuth() adminauth.BasicAuth {
 	)
 }
 
+func postJSONWithRetry(
+	ctx context.Context,
+	endpoint string,
+	payload any,
+	auth adminauth.BasicAuth,
+) error {
+	var lastErr error
+	for attempt := 1; attempt <= adminReportMaxAttempts; attempt++ {
+		lastErr = postJSON(ctx, endpoint, payload, auth)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableAdminPostError(lastErr) || attempt == adminReportMaxAttempts {
+			break
+		}
+
+		backoff := adminReportRetryBackoff * time.Duration(1<<(attempt-1))
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
+
+	return fmt.Errorf("admin report failed after %d attempts: %w", adminReportMaxAttempts, lastErr)
+}
+
+type adminPostError struct {
+	statusCode int
+	message    string
+}
+
+func (e *adminPostError) Error() string {
+	return e.message
+}
+
+func isRetryableAdminPostError(err error) bool {
+	var postErr *adminPostError
+	if errors.As(err, &postErr) {
+		if postErr.statusCode == http.StatusTooManyRequests {
+			return true
+		}
+		return postErr.statusCode >= http.StatusInternalServerError
+	}
+
+	return true
+}
+
 func postJSON(ctx context.Context, endpoint string, payload any, auth adminauth.BasicAuth) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -210,11 +263,12 @@ func postJSON(ctx context.Context, endpoint string, payload any, auth adminauth.
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		bodyText := strings.TrimSpace(string(responseBody))
+		message := fmt.Sprintf("unexpected status %s", resp.Status)
 		if bodyText != "" {
-			return fmt.Errorf("unexpected status %s: %s", resp.Status, bodyText)
+			message = fmt.Sprintf("unexpected status %s: %s", resp.Status, bodyText)
 		}
 
-		return fmt.Errorf("unexpected status %s", resp.Status)
+		return &adminPostError{statusCode: resp.StatusCode, message: message}
 	}
 
 	return nil

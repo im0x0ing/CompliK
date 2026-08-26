@@ -87,3 +87,61 @@ func TestProcscanEventIDFallsBackToDetectedTimeWithoutProcessStartTime(t *testin
 		t.Fatal("event ID did not change when detected time changed without process start time")
 	}
 }
+
+func TestReportProcscanViolationRetriesTransientAdminFailures(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	scanner := NewScanner(&models.Config{Notifications: models.NotificationsConfig{
+		Admin: models.AdminNotificationConfig{BaseURL: server.URL, Timeout: 3 * time.Second},
+	}})
+	info := &models.ProcessInfo{
+		PID: 42, ProcessName: "xmrig", Command: "xmrig --url pool",
+		Timestamp: time.Now().UTC().Format(time.RFC3339), Message: "process matched rule miner-xmrig",
+		IsIllegal: true, RulesetRevision: 7, PrimaryRuleID: "miner-xmrig",
+		MatchType: "process_name", MatchRule: "(?i)^xmrig$", Severity: "critical", RuleAction: "ban",
+		AttributionStatus: "unresolved",
+	}
+
+	if err := scanner.reportProcscanViolation(server.URL+adminViolationsPath, info); err != nil {
+		t.Fatalf("reportProcscanViolation() error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+}
+
+func TestReportProcscanViolationDoesNotRetryClientErrors(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	scanner := NewScanner(&models.Config{Notifications: models.NotificationsConfig{
+		Admin: models.AdminNotificationConfig{BaseURL: server.URL, Timeout: time.Second},
+	}})
+	info := &models.ProcessInfo{
+		PID: 42, ProcessName: "xmrig", Command: "xmrig --url pool",
+		Timestamp: time.Now().UTC().Format(time.RFC3339), Message: "process matched rule miner-xmrig",
+		IsIllegal: true, RulesetRevision: 7, PrimaryRuleID: "miner-xmrig",
+		MatchType: "process_name", MatchRule: "(?i)^xmrig$", Severity: "critical", RuleAction: "ban",
+		AttributionStatus: "unresolved",
+	}
+
+	if err := scanner.reportProcscanViolation(server.URL+adminViolationsPath, info); err == nil {
+		t.Fatal("expected client error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}

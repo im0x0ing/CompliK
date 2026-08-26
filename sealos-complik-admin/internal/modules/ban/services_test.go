@@ -179,7 +179,7 @@ func TestCreateBanPreservesRecordWhenLabelFails(t *testing.T) {
 	svc.now = func() time.Time { return time.Date(2026, time.July, 29, 8, 0, 0, 0, time.UTC) }
 
 	err := svc.CreateBan(context.Background(), CreateBanRequest{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Reason:       "manual ban",
 		BanStartTime: svc.now(),
 		OperatorName: "admin",
@@ -209,7 +209,7 @@ func TestCreateBanFailsClosedWithoutNamespaceLocker(t *testing.T) {
 	svc := NewService(repo, nil, "", nil)
 
 	err := svc.CreateBan(context.Background(), CreateBanRequest{
-		Namespace:    "demo-ns",
+		Namespace:    "ns-demo",
 		Reason:       "manual ban",
 		BanStartTime: time.Now(),
 		OperatorName: "admin",
@@ -219,5 +219,27 @@ func TestCreateBanFailsClosedWithoutNamespaceLocker(t *testing.T) {
 	}
 	if len(repo.created) != 0 {
 		t.Fatalf("expected no ban record without locker, got %d", len(repo.created))
+	}
+}
+
+func TestCreateBanRejectsNonTenantNamespace(t *testing.T) {
+	repo := &fakeBanRepository{}
+	locker := &recordingNamespaceLocker{}
+	svc := NewService(repo, nil, "", locker)
+
+	err := svc.CreateBan(context.Background(), CreateBanRequest{
+		Namespace:    "kube-system",
+		Reason:       "manual ban",
+		BanStartTime: time.Now(),
+		OperatorName: "admin",
+	})
+	if !errors.Is(err, ErrBanNamespaceNotLockable) {
+		t.Fatalf("CreateBan() error = %v, want %v", err, ErrBanNamespaceNotLockable)
+	}
+	if len(repo.created) != 0 {
+		t.Fatalf("expected no ban record, got %d", len(repo.created))
+	}
+	if len(locker.locked) != 0 {
+		t.Fatalf("expected locker not to be called, got %v", locker.locked)
 	}
 }

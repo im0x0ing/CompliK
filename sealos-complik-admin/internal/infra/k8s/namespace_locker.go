@@ -52,7 +52,12 @@ func NewNamespaceLocker() (NamespaceLocker, error) {
 }
 
 func (l *namespaceLocker) EnsureLocked(ctx context.Context, namespace string) (bool, error) {
-	return l.ensureLabel(ctx, namespace, true)
+	trimmedNamespace := strings.TrimSpace(namespace)
+	if !AllowsTenantNamespaceLock(trimmedNamespace) {
+		return false, fmt.Errorf("namespace %q is not eligible for lock", trimmedNamespace)
+	}
+
+	return l.ensureLabel(ctx, trimmedNamespace, true)
 }
 
 func (l *namespaceLocker) EnsureUnlocked(ctx context.Context, namespace string) (bool, error) {

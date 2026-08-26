@@ -24,6 +24,7 @@ var (
 	)
 	ErrBanUploadDisabled          = errors.New("ban screenshot upload is disabled: oss is not configured")
 	ErrNamespaceLockerUnavailable = errors.New("namespace locker is not configured")
+	ErrBanNamespaceNotLockable    = errors.New("only tenant namespaces with ns- prefix can be locked")
 )
 
 const (
@@ -424,6 +425,9 @@ func normalizeBanInput(
 
 	if trimmedNamespace == "" || banStartTime.IsZero() || trimmedOperatorName == "" {
 		return nil, ErrBanInvalidInput
+	}
+	if !k8s.AllowsTenantNamespaceLock(trimmedNamespace) {
+		return nil, ErrBanNamespaceNotLockable
 	}
 	// Permanent ban only: reject any non-nil end time.
 	if banEndTime != nil {
