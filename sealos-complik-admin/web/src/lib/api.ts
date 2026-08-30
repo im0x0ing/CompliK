@@ -405,37 +405,6 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function readBoolean(value: unknown): boolean | undefined {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  return undefined;
-}
-
-function isComplikIllegal(item: ComplikViolationDto) {
-  const rawPayload = readRecord(item.raw_payload);
-  const detectorResult = readRecord(rawPayload?.["检测结果"]);
-  return (
-    readBoolean(detectorResult?.["是否违规"]) ??
-    readBoolean(rawPayload?.IsIllegal) ??
-    readBoolean(rawPayload?.is_illegal) ??
-    item.is_illegal ??
-    true
-  );
-}
-
-function isProcscanIllegal(item: ProcscanViolationDto) {
-  const rawPayload = readRecord(item.raw_payload);
-  const processInfo = readRecord(rawPayload?.process_info) ?? readRecord(rawPayload?.["进程信息"]);
-  return (
-    readBoolean(processInfo?.["是否违规"]) ??
-    readBoolean(processInfo?.IsIllegal) ??
-    readBoolean(processInfo?.is_illegal) ??
-    item.is_illegal ??
-    true
-  );
-}
-
 function toConfigRecord(item: ProjectConfigDto): ConfigRecord {
   return {
     id: item.config_name,
