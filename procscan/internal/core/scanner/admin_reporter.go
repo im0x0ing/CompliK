@@ -50,10 +50,6 @@ type procscanViolationRequest struct {
 	RawPayload        any       `json:"raw_payload,omitempty"`
 }
 
-func (s *Scanner) reportProcscanViolations(processInfos []*models.ProcessInfo) {
-	s.enqueueAdminReports(processInfos)
-}
-
 func (s *Scanner) reportProcscanViolation(endpoint string, processInfo *models.ProcessInfo) error {
 	detectedAt, err := time.Parse(time.RFC3339, processInfo.Timestamp)
 	if err != nil {

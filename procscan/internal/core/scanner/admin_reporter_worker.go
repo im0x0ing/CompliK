@@ -49,14 +49,7 @@ func (s *Scanner) adminReportWorker(ctx context.Context) {
 				continue
 			}
 
-			if err := s.reportProcscanViolation(endpoint, processInfo); err != nil {
-				legacy.L.WithFields(map[string]any{
-					"namespace": processInfo.Namespace,
-					"pod":       processInfo.PodName,
-					"pid":       processInfo.PID,
-					"error":     err.Error(),
-				}).Error("Failed to report procscan violation to admin")
-			}
+			s.sendAdminReports(endpoint, processInfo)
 		}
 	}
 }
@@ -99,6 +92,10 @@ func (s *Scanner) reportProcscanViolationsSync(processInfos []*models.ProcessInf
 		return
 	}
 
+	s.sendAdminReports(endpoint, processInfos...)
+}
+
+func (s *Scanner) sendAdminReports(endpoint string, processInfos ...*models.ProcessInfo) {
 	for _, processInfo := range processInfos {
 		if processInfo == nil {
 			continue

@@ -2,8 +2,6 @@ package procscanviolation
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -287,10 +285,6 @@ func (s *Service) GetViolations(
 
 	responses := make([]ViolationResponse, 0, len(violations))
 	for i := range violations {
-		if !includeAll && !isEffectiveViolation(&violations[i]) {
-			continue
-		}
-
 		responses = append(responses, *toViolationResponse(&violations[i]))
 	}
 
@@ -308,10 +302,6 @@ func (s *Service) ListViolations(
 
 	responses := make([]ViolationResponse, 0, len(violations))
 	for i := range violations {
-		if !includeAll && !isEffectiveViolation(&violations[i]) {
-			continue
-		}
-
 		responses = append(responses, *toViolationResponse(&violations[i]))
 	}
 
@@ -353,13 +343,7 @@ func (s *Service) GetViolationStatus(
 		return nil, err
 	}
 
-	for i := range violations {
-		if isEffectiveViolation(&violations[i]) {
-			return &ViolationStatusResponse{Violated: true}, nil
-		}
-	}
-
-	return &ViolationStatusResponse{Violated: false}, nil
+	return &ViolationStatusResponse{Violated: len(violations) > 0}, nil
 }
 
 type normalizedViolationInput struct {
@@ -443,23 +427,18 @@ func normalizeViolationInput(req CreateViolationRequest) (*normalizedViolationIn
 		isIllegal = *req.IsIllegal
 	}
 
-	attributionStatus := strings.TrimSpace(req.AttributionStatus)
-	if attributionStatus == "" {
-		if namespace == nil {
-			attributionStatus = "unresolved"
-		} else {
-			attributionStatus = "resolved"
-		}
+	attributionStatus, err := normalizeAttributionStatus(req.AttributionStatus, namespace)
+	if err != nil {
+		return nil, err
 	}
-	if attributionStatus != "resolved" && attributionStatus != "unresolved" {
-		return nil, ErrViolationInvalidInput
-	}
-	if (attributionStatus == "resolved") != (namespace != nil) {
-		return nil, ErrViolationInvalidInput
+
+	eventID, err := requireEventID(req.EventID)
+	if err != nil {
+		return nil, err
 	}
 
 	return &normalizedViolationInput{
-		EventID:           normalizeEventID(req.EventID, namespace, req),
+		EventID:           eventID,
 		Namespace:         namespace,
 		PodName:           strings.TrimSpace(req.PodName),
 		PodUID:            strings.TrimSpace(req.PodUID),
@@ -502,13 +481,9 @@ func normalizedInputFromEvent(violation *ProcscanViolationEvent) *normalizedViol
 		return nil
 	}
 
-	attributionStatus := strings.TrimSpace(violation.AttributionStatus)
-	if attributionStatus == "" {
-		if violation.Namespace == nil {
-			attributionStatus = "unresolved"
-		} else {
-			attributionStatus = "resolved"
-		}
+	attributionStatus, err := normalizeAttributionStatus(violation.AttributionStatus, violation.Namespace)
+	if err != nil {
+		attributionStatus = strings.TrimSpace(violation.AttributionStatus)
 	}
 
 	return &normalizedViolationInput{
@@ -539,31 +514,32 @@ func normalizedInputFromEvent(violation *ProcscanViolationEvent) *normalizedViol
 	}
 }
 
-func normalizeEventID(value string, namespace *string, req CreateViolationRequest) string {
-	if trimmed := strings.TrimSpace(value); trimmed != "" {
-		return trimmed
+func normalizeAttributionStatus(raw string, namespace *string) (string, error) {
+	attributionStatus := strings.TrimSpace(raw)
+	if attributionStatus == "" {
+		if namespace == nil {
+			attributionStatus = "unresolved"
+		} else {
+			attributionStatus = "resolved"
+		}
+	}
+	if attributionStatus != "resolved" && attributionStatus != "unresolved" {
+		return "", ErrViolationInvalidInput
+	}
+	if (attributionStatus == "resolved") != (namespace != nil) {
+		return "", ErrViolationInvalidInput
 	}
 
-	namespaceValue := ""
-	if namespace != nil {
-		namespaceValue = *namespace
+	return attributionStatus, nil
+}
+
+func requireEventID(value string) (string, error) {
+	eventID := strings.TrimSpace(value)
+	if eventID == "" {
+		return "", ErrViolationInvalidInput
 	}
-	fingerprint := strings.Join([]string{
-		namespaceValue,
-		strings.TrimSpace(req.PodName),
-		strings.TrimSpace(req.PodUID),
-		strings.TrimSpace(req.ContainerID),
-		strings.TrimSpace(req.NodeName),
-		strconv.Itoa(req.PID),
-		strings.TrimSpace(req.ProcessName),
-		strings.TrimSpace(req.ProcessCommand),
-		strconv.FormatUint(req.RulesetRevision, 10),
-		strings.TrimSpace(req.PrimaryRuleID),
-		strings.TrimSpace(req.MatchRule),
-		req.DetectedAt.UTC().Format(time.RFC3339Nano),
-	}, "\x00")
-	sum := sha256.Sum256([]byte(fingerprint))
-	return hex.EncodeToString(sum[:])
+
+	return eventID, nil
 }
 
 func validateNamespace(namespace string) error {

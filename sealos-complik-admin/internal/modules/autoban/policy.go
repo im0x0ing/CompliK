@@ -17,7 +17,7 @@ const (
 	defaultReasonPrefix = "Admin auto-ban"
 )
 
-var defaultNamespaceDenylist = append([]string(nil), k8s.ProtectedNamespaces...)
+var defaultNamespaceDenylist []string
 
 type Policy struct {
 	Enabled              bool

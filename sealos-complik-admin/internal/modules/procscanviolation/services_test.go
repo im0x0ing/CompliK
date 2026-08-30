@@ -128,6 +128,7 @@ func (h *fakeDecisionHandler) HandleViolationDecision(
 func TestNormalizeViolationTreatsUnknownNamespaceAsUnresolved(t *testing.T) {
 	unknown := "unknown"
 	input, err := normalizeViolationInput(CreateViolationRequest{
+		EventID:        "test-event-id",
 		Namespace:      &unknown,
 		PID:            10,
 		ProcessName:    "xmrig",
@@ -237,32 +238,37 @@ func TestValidateAndHandleAutobanRetriesTransientAttributionFailure(t *testing.T
 	}
 }
 
-func TestNormalizeEventIDIncludesPodUID(t *testing.T) {
+func TestNormalizeViolationInputRequiresEventID(t *testing.T) {
 	namespace := "demo"
-	req := CreateViolationRequest{
+	_, err := normalizeViolationInput(CreateViolationRequest{
 		Namespace:      &namespace,
-		PodName:        "miner-pod",
-		PodUID:         "pod-a",
-		ContainerID:    "container",
-		NodeName:       "node-a",
 		PID:            42,
 		ProcessName:    "xmrig",
 		ProcessCommand: "xmrig --url pool",
 		Message:        "matched",
 		DetectedAt:     testDetectedAt(),
+	})
+	if !errors.Is(err, ErrViolationInvalidInput) {
+		t.Fatalf("normalizeViolationInput() error = %v, want %v", err, ErrViolationInvalidInput)
 	}
-	first, err := normalizeViolationInput(req)
-	if err != nil {
-		t.Fatalf("normalize first input: %v", err)
-	}
+}
 
-	req.PodUID = "pod-b"
-	second, err := normalizeViolationInput(req)
+func TestNormalizeViolationInputUsesProvidedEventID(t *testing.T) {
+	namespace := "demo"
+	input, err := normalizeViolationInput(CreateViolationRequest{
+		EventID:        "stable-event-id",
+		Namespace:      &namespace,
+		PID:            42,
+		ProcessName:    "xmrig",
+		ProcessCommand: "xmrig --url pool",
+		Message:        "matched",
+		DetectedAt:     testDetectedAt(),
+	})
 	if err != nil {
-		t.Fatalf("normalize second input: %v", err)
+		t.Fatalf("normalizeViolationInput() error = %v", err)
 	}
-	if first.EventID == second.EventID {
-		t.Fatal("event ID did not change when Pod UID changed")
+	if input.EventID != "stable-event-id" {
+		t.Fatalf("EventID = %q, want stable-event-id", input.EventID)
 	}
 }
 
