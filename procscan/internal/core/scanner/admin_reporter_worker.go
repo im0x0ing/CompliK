@@ -3,8 +3,8 @@ package scanner
 import (
 	"context"
 
-	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
 	legacy "github.com/bearslyricattack/CompliK/procscan/pkg/logger/legacy"
+	"github.com/bearslyricattack/CompliK/procscan/pkg/models"
 )
 
 const (
@@ -119,7 +119,9 @@ func (s *Scanner) stopAdminReporter() {
 		return
 	}
 
-	close(s.reportQueue)
+	// Workers are stopped by the parent context. Do not close the queue: an
+	// enqueue operation may still hold a read-side snapshot of this channel.
+	// Closing it here would turn that benign shutdown race into a panic.
 	s.reportQueue = nil
 	s.reportStarted = false
 }

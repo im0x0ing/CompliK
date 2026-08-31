@@ -56,6 +56,7 @@ func validDatabaseConfig() config.DatabaseConfig {
 		Host:     "localhost",
 		Port:     3306,
 		Username: "root",
+		Password: "test-password",
 		Name:     "sealos-complik-admin",
 	}
 }

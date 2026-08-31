@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: web
-          image: leonincs/complik-admin-web:xcq1
-          imagePullPolicy: Always
+          image: ghcr.io/labring/sealos-complik-admin-web:0.3.0
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
           resources:

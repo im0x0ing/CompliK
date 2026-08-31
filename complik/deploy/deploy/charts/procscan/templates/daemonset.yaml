@@ -27,6 +27,10 @@ spec:
       hostNetwork: {{ .Values.daemonset.hostNetwork }}
       hostPID: {{ .Values.daemonset.hostPID }}
       serviceAccountName: {{ include "procscan.serviceAccountName" . }}
+      {{- with .Values.daemonset.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -74,7 +78,7 @@ spec:
               readOnly: true
             - name: containerd-sock
               mountPath: {{ .Values.volumes.containerdSock.mountPath }}
-              readOnly: false
+              readOnly: true
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
       volumes:

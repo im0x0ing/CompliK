@@ -15,6 +15,10 @@ import (
 const (
 	pingTimeout           = 5 * time.Second
 	maxDatabaseNameLength = 64
+	maxOpenConnections    = 25
+	maxIdleConnections    = 5
+	connectionMaxLifetime = 30 * time.Minute
+	connectionMaxIdleTime = 5 * time.Minute
 )
 
 var client *gorm.DB
@@ -131,6 +135,10 @@ func ValidateConfig(cfg config.DatabaseConfig) error {
 		return errors.New("database username is required")
 	}
 
+	if strings.TrimSpace(cfg.Password) == "" {
+		return errors.New("database password is required")
+	}
+
 	if cfg.Name == "" {
 		return errors.New("database name is required")
 	}
@@ -181,6 +189,10 @@ func open(dsn string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get sql db: %w", err)
 	}
+	sqlDB.SetMaxOpenConns(maxOpenConnections)
+	sqlDB.SetMaxIdleConns(maxIdleConnections)
+	sqlDB.SetConnMaxLifetime(connectionMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(connectionMaxIdleTime)
 
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()

@@ -8,6 +8,8 @@ import (
 
 	mysqlDriver "github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"sealos-complik-admin/internal/modules/autoban"
 	"sealos-complik-admin/internal/modules/violationquery"
 )
 
@@ -59,6 +61,72 @@ func (r *Repository) GetViolationByEventID(
 	}
 
 	return &violation, nil
+}
+
+func (r *Repository) WithEventIDLock(
+	ctx context.Context,
+	eventID string,
+	fn func(*ProcscanViolationEvent) error,
+) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var violation ProcscanViolationEvent
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("event_id = ?", eventID).
+			First(&violation).Error; err != nil {
+			return err
+		}
+
+		return fn(&violation)
+	})
+}
+
+func (r *Repository) UpdateAutobanDecisionIfAttempt(
+	ctx context.Context,
+	id uint64,
+	status string,
+	reason string,
+	attemptCount int,
+	nextRetryAt *time.Time,
+	expectedAttemptCount int,
+) (bool, error) {
+	result := r.db.WithContext(ctx).Model(&ProcscanViolationEvent{}).
+		Where("id = ? AND autoban_attempt_count = ?", id, expectedAttemptCount).
+		Updates(map[string]any{
+			"autoban_status":        status,
+			"autoban_reason":        reason,
+			"autoban_attempt_count": attemptCount,
+			"autoban_next_retry_at": nextRetryAt,
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+
+	return result.RowsAffected > 0, nil
+}
+
+func (r *Repository) ListAutobanRetryCandidates(
+	ctx context.Context,
+	now time.Time,
+	limit int,
+) ([]ProcscanViolationEvent, error) {
+	if limit <= 0 {
+		limit = defaultAutobanRetryReconcileLimit
+	}
+
+	var violations []ProcscanViolationEvent
+	err := r.db.WithContext(ctx).
+		Where("event_id IS NOT NULL AND event_id <> ''").
+		Where("autoban_attempt_count < ?", maxAutobanAttempts).
+		Where("autoban_next_retry_at IS NOT NULL AND autoban_next_retry_at <= ?", now.UTC()).
+		Where("autoban_status = ?", autoban.DecisionFailed).
+		Order("autoban_next_retry_at ASC, id ASC").
+		Limit(limit).
+		Find(&violations).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return violations, nil
 }
 
 func (r *Repository) UpdateAutobanDecision(

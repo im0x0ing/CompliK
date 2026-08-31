@@ -15,7 +15,7 @@ const (
 	defaultDBPort     = 3306
 	defaultDBUsername = "root"
 	defaultDBName     = "sealos-complik-admin"
-	defaultDBPassword = "123456"
+	defaultDBPassword = ""
 	defaultOSSPrefix  = "commitments"
 	defaultAuthRealm  = "CompliK Admin"
 )
@@ -73,7 +73,8 @@ func LoadConfig(configFile string) *Config {
 			ObjectPrefix: defaultOSSPrefix,
 		},
 		Auth: AuthConfig{
-			Realm: defaultAuthRealm,
+			Enabled: true,
+			Realm:   defaultAuthRealm,
 		},
 	}
 	// Load base config from file

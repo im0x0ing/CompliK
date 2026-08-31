@@ -23,7 +23,12 @@ import (
 	"sealos-complik-admin/internal/modules/unban"
 )
 
-func InitRouter(cfg *config.Config) (*gin.Engine, error) {
+type App struct {
+	Engine   *gin.Engine
+	Shutdown func(context.Context)
+}
+
+func InitRouter(cfg *config.Config) (*App, error) {
 	g := gin.Default()
 	g.GET("/health", HealthCheck)
 	g.GET("/ready", HealthCheck)
@@ -54,16 +59,27 @@ func InitRouter(cfg *config.Config) (*gin.Engine, error) {
 	}
 
 	projectconfig.InitProjectConfigRoutes(g)
-	procscanrule.InitRoutes(g, cfg.ProcscanRules)
-	procscanviolation.InitRoutes(g, autobanService)
+	procscanRuleService := procscanrule.InitRoutes(g, cfg.ProcscanRules)
+	var attributionVerifier procscanviolation.AttributionVerifier
+	if verifier, ok := locker.(procscanviolation.AttributionVerifier); ok {
+		attributionVerifier = verifier
+	}
+	procscanService := procscanviolation.InitRoutes(g, autobanService, procscanRuleService, attributionVerifier)
 
 	if _, err := unban.InitUnbanRoutes(g, locker); err != nil {
 		return nil, fmt.Errorf("init unban routes: %w", err)
 	}
 
-	banService.StartLabelReconciler(context.Background(), 0)
+	reconcilerCtx, reconcilerCancel := context.WithCancel(context.Background())
+	banService.StartLabelReconciler(reconcilerCtx, 0)
+	procscanService.StartAutobanRetryReconciler(reconcilerCtx, 0)
 
-	return g, nil
+	return &App{
+		Engine: g,
+		Shutdown: func(context.Context) {
+			reconcilerCancel()
+		},
+	}, nil
 }
 
 func buildNamespaceLocker() k8s.NamespaceLocker {

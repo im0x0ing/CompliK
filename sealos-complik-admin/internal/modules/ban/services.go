@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -37,6 +38,7 @@ type Service struct {
 	locker     k8s.NamespaceLocker
 	ossPrefix  string
 	now        func() time.Time
+	labelReconcileOnce sync.Once
 }
 
 type BanRepository interface {
@@ -257,7 +259,9 @@ func (s *Service) StartLabelReconciler(ctx context.Context, interval time.Durati
 		interval = defaultLabelReconcileInterval
 	}
 
-	go s.runLabelReconciler(ctx, interval)
+	s.labelReconcileOnce.Do(func() {
+		go s.runLabelReconciler(ctx, interval)
+	})
 }
 
 func (s *Service) runLabelReconciler(ctx context.Context, interval time.Duration) {

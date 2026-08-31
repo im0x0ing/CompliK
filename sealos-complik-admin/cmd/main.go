@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"sealos-complik-admin/internal/infra/config"
 	"sealos-complik-admin/internal/infra/database"
@@ -48,17 +54,45 @@ func run() error {
 		return fmt.Errorf("auto migrate tables: %w", err)
 	}
 
-	srv, err := router.InitRouter(cfg)
+	app, err := router.InitRouter(cfg)
 	if err != nil {
 		return fmt.Errorf("initialize router: %w", err)
 	}
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
+	server := &http.Server{
+		Addr:    addr,
+		Handler: app.Engine,
+	}
 
-	log.Printf("server listening on %s", addr)
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
 
-	if err := srv.Run(addr); err != nil {
-		return fmt.Errorf("run server: %w", err)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("run server: %w", err)
+		}
+	case sig := <-stop:
+		log.Printf("received signal %s, shutting down", sig)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	app.Shutdown(shutdownCtx)
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("shutdown server: %w", err)
 	}
 
 	return nil

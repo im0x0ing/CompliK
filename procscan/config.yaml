@@ -15,7 +15,7 @@ scanner:
 
 notifications:
   admin:
-    base_url: "http://sealos-complik-admin:8080"
+    base_url: "http://sealos-complik-admin.sealos.svc.cluster.local:8080"
     timeout: "10s"
     basic_auth:
       username: "${PROCSCAN_BASIC_AUTH_USERNAME}"

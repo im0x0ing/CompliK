@@ -77,7 +77,7 @@ func TestEnsureLockedSkipsAlreadyLockedNamespace(t *testing.T) {
 func TestEnsureUnlockedRemovesNamespaceLabel(t *testing.T) {
 	client := fake.NewSimpleClientset(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "demo",
+			Name: "ns-demo",
 			Labels: map[string]string{
 				NamespaceLockLabelKey: NamespaceLockLabelValue,
 				"existing":            "label",
@@ -86,7 +86,7 @@ func TestEnsureUnlockedRemovesNamespaceLabel(t *testing.T) {
 	})
 	locker := &namespaceLocker{client: client}
 
-	changed, err := locker.EnsureUnlocked(context.Background(), "demo")
+	changed, err := locker.EnsureUnlocked(context.Background(), "ns-demo")
 	if err != nil {
 		t.Fatalf("EnsureUnlocked returned error: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestEnsureUnlockedRemovesNamespaceLabel(t *testing.T) {
 
 	namespace, err := client.CoreV1().
 		Namespaces().
-		Get(context.Background(), "demo", metav1.GetOptions{})
+		Get(context.Background(), "ns-demo", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get namespace: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestEnsureUnlockedIgnoresMissingNamespace(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	locker := &namespaceLocker{client: client}
 
-	changed, err := locker.EnsureUnlocked(context.Background(), "demo")
+	changed, err := locker.EnsureUnlocked(context.Background(), "ns-demo")
 	if err != nil {
 		t.Fatalf("EnsureUnlocked returned error: %v", err)
 	}
@@ -124,8 +124,23 @@ func TestEnsureUnlockedIgnoresMissingNamespace(t *testing.T) {
 		t.Fatal("expected missing namespace to be unchanged")
 	}
 
-	_, err = client.CoreV1().Namespaces().Get(context.Background(), "demo", metav1.GetOptions{})
+	_, err = client.CoreV1().Namespaces().Get(context.Background(), "ns-demo", metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected namespace to stay missing, got %v", err)
+	}
+}
+
+func TestEnsureUnlockedRejectsNonTenantNamespace(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "kube-system"},
+	})
+	locker := &namespaceLocker{client: client}
+
+	changed, err := locker.EnsureUnlocked(context.Background(), "kube-system")
+	if err == nil {
+		t.Fatal("expected EnsureUnlocked to reject kube-system")
+	}
+	if changed {
+		t.Fatal("expected no label change for rejected namespace")
 	}
 }

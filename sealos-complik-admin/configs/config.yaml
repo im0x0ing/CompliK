@@ -8,13 +8,13 @@ database:
   host: localhost
   port: 3306
   username: root
-  password: 123456
+  password: "" # Set DB_PASSWORD through a Secret in deployed environments.
   name: sealos-complik-admin
 
 auth:
-  enabled: false
-  username: admin
-  password: changeme
+  enabled: true
+  username: "" # Set ADMIN_BASIC_AUTH_USERNAME through a Secret.
+  password: "" # Set ADMIN_BASIC_AUTH_PASSWORD through a Secret.
   realm: CompliK Admin
 
 procscan_auth:

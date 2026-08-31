@@ -79,8 +79,8 @@ spec:
       serviceAccountName: sealos-complik-admin
       containers:
         - name: backend
-          image: leonincs/sealos-complik-admin:xcq
-          imagePullPolicy: Always
+          image: ghcr.io/labring/sealos-complik-admin:0.3.0
+          imagePullPolicy: IfNotPresent
           env:
             - name: CONFIG_FILE
               value: /config/config.yaml

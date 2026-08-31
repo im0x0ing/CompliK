@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -46,6 +47,7 @@ type Service struct {
 	rules               *procscanrule.Service
 	attributionVerifier AttributionVerifier
 	now                 func() time.Time
+	autobanReconcileOnce sync.Once
 }
 
 func NewService(
@@ -123,32 +125,9 @@ func (s *Service) CreateViolation(ctx context.Context, req CreateViolationReques
 		if !shouldRetryAutoban(existing, s.now().UTC()) {
 			return nil
 		}
-		violation = existing
-		input = normalizedInputFromEvent(existing)
 	}
 
-	decision := s.validateAndHandleAutoban(ctx, input, violation)
-	attemptCount := violation.AutobanAttemptCount + 1
-	var nextRetryAt *time.Time
-	if shouldScheduleAutobanRetry(decision, attemptCount) {
-		retryAt := s.now().UTC().Add(autobanRetryDelay(attemptCount))
-		nextRetryAt = &retryAt
-	}
-
-	violation.AutobanStatus = decision.Status
-	violation.AutobanReason = decision.Reason
-	if err := s.repository.UpdateAutobanDecision(
-		ctx,
-		violation.ID,
-		decision.Status,
-		decision.Reason,
-		attemptCount,
-		nextRetryAt,
-	); err != nil {
-		return translateRepositoryError(err)
-	}
-
-	return nil
+	return s.processAutobanUnderEventLock(ctx, input.EventID)
 }
 
 func (s *Service) validateAndHandleAutoban(

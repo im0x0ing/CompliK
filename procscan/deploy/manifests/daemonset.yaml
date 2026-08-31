@@ -30,8 +30,8 @@ spec:
       serviceAccountName: block-procscan
       containers:
         - name: scanner
-          image: docker.io/bearslyricattack/sealos-procscan
-          imagePullPolicy: Always
+          image: ghcr.io/labring/procscan:0.3.0
+          imagePullPolicy: IfNotPresent
           command: ["/manager"]
           args:
             - "--config=/config/config.yaml"
@@ -91,6 +91,7 @@ spec:
               readOnly: true
             - mountPath: /var/run/containerd/containerd.sock
               name: containerd-sock
+              readOnly: true
           resources:
             limits:
               memory: 512Mi
