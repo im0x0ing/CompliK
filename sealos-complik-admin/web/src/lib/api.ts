@@ -93,6 +93,7 @@ type ProcscanViolationDto = {
   match_rule?: string;
   label_action_status?: string;
   label_action_result?: string;
+  autoban_status?: string;
   message: string;
   is_illegal?: boolean;
   detected_at: string;
@@ -549,6 +550,7 @@ function toProcscanViolationRecord(item: ProcscanViolationDto): ViolationRecord 
     matchRule: item.match_rule,
     labelActionStatus: item.label_action_status,
     labelActionResult: item.label_action_result,
+    autobanStatus: item.autoban_status,
     message: item.message,
     detectedAt: formatDateTime(item.detected_at),
     detectedAtMs: new Date(item.detected_at).getTime(),

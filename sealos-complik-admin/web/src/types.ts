@@ -54,6 +54,7 @@ export type ViolationRecord = {
   matchRule?: string;
   labelActionStatus?: string;
   labelActionResult?: string;
+  autobanStatus?: string;
   message?: string;
   detectedAt: string;
   detectedAtMs: number;

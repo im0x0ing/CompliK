@@ -214,7 +214,8 @@ export function AutobanPolicyPage() {
     try {
       const page = await listViolationRecordsPage({
         page: 1,
-        scope: "illegal",
+        keyword: "",
+        scope: "violations",
         timeRange: "7d",
         type: "procscan",
       });
