@@ -358,16 +358,34 @@ function normalizeAutobanPolicy(value: unknown): AutobanPolicy {
 }
 
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+  const onAbort = () => controller.abort();
+  if (init?.signal) {
+    if (init.signal.aborted) {
+      controller.abort();
+    } else {
+      init.signal.addEventListener("abort", onAbort, { once: true });
+    }
+  }
+
   const headers = new Headers(init?.headers);
   const shouldSetJSONContentType = !(init?.body instanceof FormData);
   if (shouldSetJSONContentType && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(input, {
-    headers,
-    ...init,
-  });
+  let response: Response;
+  try {
+    response = await fetch(input, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+    init?.signal?.removeEventListener("abort", onAbort);
+  }
 
   if (!response.ok) {
     let payload: ApiErrorPayload | null = null;
@@ -614,7 +632,7 @@ export async function createCommitmentRecord(input: CreateCommitmentInput) {
     });
   } catch (error) {
     // Backward compatibility: older backends expose upload at POST /api/commitments.
-    if (error instanceof Error && error.message.includes("404")) {
+    if (error instanceof ApiRequestError && error.status === 404) {
       try {
         await request("/api/commitments", {
           method: "POST",
@@ -687,7 +705,7 @@ export async function createBanRecord(input: CreateBanInput) {
       body: formData,
     });
   } catch (error) {
-    if (error instanceof Error && error.message.includes("404")) {
+    if (error instanceof ApiRequestError && error.status === 404) {
       try {
         await request("/api/bans", {
           method: "POST",

@@ -268,9 +268,9 @@ function buildStats(
     {
       label: "违规 namespace 数",
       value: String(violationNamespaces.size),
-      delta: `${violations.length} 条违规记录`,
+      delta: `${violations.length} 条近 7 天记录`,
       tone: "danger",
-      description: "按当前违规记录对应的 namespace 去重统计。",
+      description: "按最近 7 天违规记录对应的 namespace 去重统计。",
       targetPath: "/violations",
     },
     {
@@ -284,7 +284,7 @@ function buildStats(
     {
       label: "今日新增违规",
       value: String(todayViolationCount),
-      delta: `${violations.length} 条累计记录`,
+      delta: `${violations.length} 条近 7 天记录`,
       tone: "info",
       description: "包含内容违规和进程违规两类事件。",
       targetPath: "/violations",
@@ -292,7 +292,7 @@ function buildStats(
     {
       label: "今日新增处置",
       value: String(todayActionCount),
-      delta: `${unbans.length} 条解封记录`,
+      delta: `${bans.length + unbans.length} 条处置记录`,
       tone: "success",
       description: "包含今日新增封禁和解封动作。",
       targetPath: "/unbans",
@@ -312,7 +312,7 @@ function buildLatestViolations(violations: ViolationRecord[]): ActivityItem[] {
           : `${item.processName ?? "进程检测器"} 命中进程规则`,
       time: item.detectedAt,
       tone: getViolationTone(item.type),
-      targetPath: `/namespaces/${item.namespace}`,
+      targetPath: item.namespace ? `/namespaces/${encodeURIComponent(item.namespace)}` : undefined,
     }));
 }
 

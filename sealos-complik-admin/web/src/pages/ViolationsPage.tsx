@@ -1,5 +1,5 @@
 import { RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -39,11 +39,13 @@ export function ViolationsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [selected, setSelected] = useState<ViolationRecord | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ViolationRecord | null>(null);
+  const requestSequence = useRef(0);
 
   const rows = data.list;
   const totalPages = data.totalPages;
 
   const loadViolations = useCallback(async () => {
+    const sequence = ++requestSequence.current;
     setIsLoading(true);
     setError(null);
     try {
@@ -54,12 +56,18 @@ export function ViolationsPage() {
         keyword,
         timeRange,
       });
+      if (sequence !== requestSequence.current) {
+        return;
+      }
       if (nextData.totalPages > 0 && page > nextData.totalPages) {
         setPage(nextData.totalPages);
         return;
       }
       setData(nextData);
     } catch (err) {
+      if (sequence !== requestSequence.current) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "违规数据加载失败");
       setData({
         list: [],
@@ -69,7 +77,9 @@ export function ViolationsPage() {
         totalPages: 0,
       });
     } finally {
-      setIsLoading(false);
+      if (sequence === requestSequence.current) {
+        setIsLoading(false);
+      }
     }
   }, [keyword, page, scope, tab, timeRange]);
 
@@ -287,9 +297,11 @@ export function ViolationsPage() {
               </div>
             </div>
             <div className="button-row" style={{ marginTop: 20 }}>
-              <Button variant="secondary" onClick={() => navigate(`/namespaces/${selected.namespace}`)}>
-                查看 namespace 详情
-              </Button>
+              {selected.namespace ? (
+                <Button variant="secondary" onClick={() => navigate(`/namespaces/${encodeURIComponent(selected.namespace)}`)}>
+                  查看 namespace 详情
+                </Button>
+              ) : null}
               <Button variant="danger" onClick={() => setPendingDelete(selected)}>
                 删除记录
               </Button>

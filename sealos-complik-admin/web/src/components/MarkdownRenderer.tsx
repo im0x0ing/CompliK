@@ -13,7 +13,9 @@ function sanitizeURL(value: string) {
     return null;
   }
 
-  if (/^(https?:\/\/|\/)/i.test(trimmed)) {
+  // Allow HTTPS links and same-origin absolute paths, but reject
+  // protocol-relative URLs (//host), which are external navigations.
+  if (/^https:\/\//i.test(trimmed) || (/^\/(?!\/)/.test(trimmed))) {
     return escapeHTML(trimmed);
   }
 

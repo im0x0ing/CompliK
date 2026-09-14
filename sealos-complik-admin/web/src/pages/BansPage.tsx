@@ -24,7 +24,8 @@ import type { BanRecord, PaginatedRecords } from "../types";
 export function BansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { banRecords, configRecords, createBanRecord, deleteBanRecord, unbanRecords } = useAppData();
+  const { banRecords, configRecords, createBanRecord, deleteBanRecord, refreshAll, unbanRecords } = useAppData();
+  const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<BanRecord | null>(null);
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState(() => searchParams.get("namespace") ?? "");
@@ -188,7 +189,21 @@ export function BansPage() {
         kicker="Bans"
         title="封禁记录"
         description="录入和查看封禁记录，操作人从固定名单选择，描述使用纯文本输入，截图支持上传和粘贴。"
-        actions={<Button variant="primary" onClick={() => setOpen(true)}>新增封禁</Button>}
+        actions={
+          <>
+            <Button
+              disabled={refreshing}
+              variant="secondary"
+              onClick={() => {
+                setRefreshing(true);
+                void refreshAll().finally(() => setRefreshing(false));
+              }}
+            >
+              <RefreshCw size={16} /> {refreshing ? "刷新中..." : "刷新"}
+            </Button>
+            <Button variant="primary" onClick={() => setOpen(true)}>新增封禁</Button>
+          </>
+        }
       />
 
       <SurfaceCard>

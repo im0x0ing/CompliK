@@ -1,5 +1,6 @@
+import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import {
   Button,
   EmptyState,
@@ -9,10 +10,12 @@ import {
   PageHeader,
   Select,
   StatusPill,
+  SurfaceCard,
 } from "../components/ui";
 import {
   ApiRequestError,
   defaultAutobanPolicy,
+  listViolationRecordsPage,
   loadAutobanPolicy,
   loadProcscanRuleSet,
   loadProcscanRulesStatus,
@@ -20,7 +23,7 @@ import {
   saveProcscanRuleSet,
   validateProcscanRuleSet,
 } from "../lib/api";
-import type { AutobanPolicy, ProcscanRule, ProcscanRuleSet } from "../types";
+import type { AutobanPolicy, ProcscanRule, ProcscanRuleSet, ViolationRecord } from "../types";
 
 type ManagedRule = {
   id: string;
@@ -150,7 +153,24 @@ function NamespacePicker({
   );
 }
 
+function getAutobanLabel(status?: string) {
+  return status === "submitted"
+    ? "已提交封禁"
+    : status === "dry_run"
+      ? "观察模式命中"
+      : status === "not_triggered"
+        ? "未触发封禁"
+        : status === "failed"
+          ? "封禁提交失败"
+          : status || "-";
+}
+
+function getNamespaceLabel(namespace?: string) {
+  return namespace?.trim() || "未解析";
+}
+
 export function AutobanPolicyPage() {
+  const navigate = useNavigate();
   const [policy, setPolicy] = useState<AutobanPolicy>(() => defaultAutobanPolicy());
   const [initialPolicy, setInitialPolicy] = useState<AutobanPolicy>(() => defaultAutobanPolicy());
   const [policyExists, setPolicyExists] = useState(false);
@@ -167,6 +187,8 @@ export function AutobanPolicyPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmedExecution, setConfirmedExecution] = useState(false);
+  const [recentHits, setRecentHits] = useState<ViolationRecord[]>([]);
+  const [recentHitsLoading, setRecentHitsLoading] = useState(false);
 
   const managedRules = useMemo(() => getManagedRules(ruleSet), [ruleSet]);
   const filteredManagedRules = useMemo(() => {
@@ -186,6 +208,23 @@ export function AutobanPolicyPage() {
     !managedRules.some((rule) => toExactProcessName(rule.pattern) === processNameDraft.trim());
   const canAddNamespaceDenylist = isValidNamespace(namespaceDenylistDraft.trim()) &&
     !policy.namespaceDenylist.includes(namespaceDenylistDraft.trim());
+
+  const loadRecentHits = async () => {
+    setRecentHitsLoading(true);
+    try {
+      const page = await listViolationRecordsPage({
+        page: 1,
+        scope: "illegal",
+        timeRange: "7d",
+        type: "procscan",
+      });
+      setRecentHits(page.list.slice(0, 10));
+    } catch {
+      setRecentHits([]);
+    } finally {
+      setRecentHitsLoading(false);
+    }
+  };
 
   const load = async () => {
     setIsLoading(true);
@@ -227,6 +266,7 @@ export function AutobanPolicyPage() {
     } finally {
       setIsLoading(false);
     }
+    await loadRecentHits();
   };
 
   useEffect(() => {
@@ -499,6 +539,60 @@ export function AutobanPolicyPage() {
           </div>
         </aside>
       </div>
+
+      <SurfaceCard className="autoban-recent-hits" padded={false}>
+        <div className="autoban-section-header" style={{ padding: "20px 20px 0" }}>
+          <div>
+            <h2>最近进程命中</h2>
+            <p>展示最近命中的进程及其所在 Namespace，便于核对自动封禁目标。</p>
+          </div>
+          <Button disabled={recentHitsLoading} onClick={() => void loadRecentHits()} variant="secondary">
+            <RefreshCw size={16} /> {recentHitsLoading ? "刷新中..." : "刷新"}
+          </Button>
+        </div>
+        {recentHitsLoading ? (
+          <div style={{ padding: 20 }}>
+            <EmptyState title="正在加载最近命中" description="正在从违规中心同步 Procscan 记录。" />
+          </div>
+        ) : recentHits.length === 0 ? (
+          <div style={{ padding: 20 }}>
+            <EmptyState title="最近 7 天暂无进程命中" description="命中高风险进程后，这里会显示进程名和对应 Namespace。" />
+          </div>
+        ) : (
+          <div className="autoban-rule-table-wrap" style={{ padding: "0 20px 20px" }}>
+            <table className="autoban-rule-table">
+              <thead>
+                <tr>
+                  <th>进程名</th>
+                  <th>Namespace</th>
+                  <th>Pod</th>
+                  <th>自动封禁</th>
+                  <th>发现时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentHits.map((hit) => (
+                  <tr key={hit.id}>
+                    <td><strong>{hit.processName ?? "-"}</strong></td>
+                    <td>
+                      {hit.namespace ? (
+                        <button className="namespace-link table-row-button" onClick={() => navigate(`/namespaces/${hit.namespace}`)} type="button">
+                          {hit.namespace}
+                        </button>
+                      ) : (
+                        <span className="muted-text">{getNamespaceLabel(hit.namespace)}</span>
+                      )}
+                    </td>
+                    <td>{hit.podName ?? "-"}</td>
+                    <td><StatusPill tone={hit.autobanStatus === "submitted" ? "danger" : hit.autobanStatus === "dry_run" ? "warn" : "neutral"}>{getAutobanLabel(hit.autobanStatus)}</StatusPill></td>
+                    <td>{hit.detectedAt}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SurfaceCard>
 
       <Modal description="命中这些进程后，将封禁该进程所在的整个 Namespace。" onClose={() => { setConfirmOpen(false); setConfirmedExecution(false); }} open={confirmOpen} title="确认启用自动执行">
         <div className="panel-stack">
