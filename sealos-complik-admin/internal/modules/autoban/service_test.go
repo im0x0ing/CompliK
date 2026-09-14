@@ -222,6 +222,27 @@ func TestHandleViolationUsesConservativeDefaultPolicy(t *testing.T) {
 	}
 }
 
+func TestHandleViolationReportsUnavailableBanServiceAsFailure(t *testing.T) {
+	svc := NewService(policyRepo(`{
+		"enabled": true,
+		"dryRun": false,
+		"sources": { "procscan": { "enabled": true } }
+	}`), nil)
+
+	decision, err := svc.HandleViolationDecision(context.Background(), Violation{
+		Namespace:    "ns-demo",
+		Source:       SourceProcscan,
+		DetectorName: "miner-rule",
+		IsIllegal:    true,
+	})
+	if err == nil {
+		t.Fatal("expected unavailable ban service error")
+	}
+	if decision.Status != DecisionFailed || decision.Reason != "ban_service_unavailable" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+}
+
 func TestHandleViolationRejectsNonTenantNamespaces(t *testing.T) {
 	fake := &fakeBanService{}
 	svc := NewService(policyRepo(`{

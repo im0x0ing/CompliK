@@ -16,7 +16,13 @@ var (
 	ErrProjectConfigInvalidJSON   = errors.New("project config value must be valid json")
 	ErrProjectConfigInvalidInput  = errors.New("config name and config type are required")
 	ErrProjectConfigNotFound      = errors.New("project config not found")
+	ErrProjectConfigProtected     = errors.New("project config is managed by a dedicated API")
 )
+
+var protectedConfigNames = map[string]struct{}{
+	"procscan_rules":    {},
+	"procscan_rules_v2": {},
+}
 
 type Service struct {
 	repository *Repository
@@ -28,6 +34,9 @@ func NewService(repository *Repository) *Service {
 
 // CreateProjectConfig creates a new project configuration based on the provided request data.
 func (s *Service) CreateProjectConfig(ctx context.Context, req CreateProjectConfigRequest) error {
+	if isProtectedConfigName(req.ConfigName) {
+		return ErrProjectConfigProtected
+	}
 	input, err := normalizeProjectConfigInput(
 		req.ConfigName,
 		req.ConfigType,
@@ -59,6 +68,9 @@ func (s *Service) UpdateProjectConfig(
 	configName string,
 	req UpdateProjectConfigRequest,
 ) error {
+	if isProtectedConfigName(configName) || isProtectedConfigName(req.ConfigName) {
+		return ErrProjectConfigProtected
+	}
 	projectConfig, err := s.repository.GetProjectConfigByName(ctx, strings.TrimSpace(configName))
 	if err != nil {
 		return translateRepositoryError(err)
@@ -88,6 +100,9 @@ func (s *Service) UpdateProjectConfig(
 
 // DeleteProjectConfig deletes a project configuration by config name.
 func (s *Service) DeleteProjectConfig(ctx context.Context, configName string) error {
+	if isProtectedConfigName(configName) {
+		return ErrProjectConfigProtected
+	}
 	if err := s.repository.DeleteProjectConfigByName(
 		ctx,
 		strings.TrimSpace(configName),
@@ -96,6 +111,11 @@ func (s *Service) DeleteProjectConfig(ctx context.Context, configName string) er
 	}
 
 	return nil
+}
+
+func isProtectedConfigName(name string) bool {
+	_, protected := protectedConfigNames[strings.ToLower(strings.TrimSpace(name))]
+	return protected
 }
 
 // GetProjectConfig returns a project configuration by config name.

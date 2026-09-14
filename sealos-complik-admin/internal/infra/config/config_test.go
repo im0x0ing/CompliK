@@ -53,3 +53,34 @@ auth:
 		t.Fatalf("name = %q, want env-db", cfg.Database.Name)
 	}
 }
+
+func TestLoadConfigAppliesProcscanAuthAndRuleWriteOverrides(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`port: 8081
+auth:
+  enabled: true
+  username: admin
+  password: admin-password
+procscan_auth:
+  enabled: false
+procscan_rules:
+  v2_writes_enabled: false
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("PROCSCAN_BASIC_AUTH_ENABLED", "true")
+	t.Setenv("PROCSCAN_BASIC_AUTH_USERNAME", "procscan")
+	t.Setenv("PROCSCAN_BASIC_AUTH_PASSWORD", "procscan-password")
+	t.Setenv("PROCSCAN_RULES_V2_WRITES_ENABLED", "true")
+
+	cfg := config.LoadConfig(configPath)
+	if !cfg.ProcscanAuth.Enabled || cfg.ProcscanAuth.Username != "procscan" ||
+		cfg.ProcscanAuth.Password != "procscan-password" {
+		t.Fatalf("unexpected procscan auth: %+v", cfg.ProcscanAuth)
+	}
+	if !cfg.ProcscanRules.V2WritesEnabled {
+		t.Fatal("V2WritesEnabled = false, want true")
+	}
+}

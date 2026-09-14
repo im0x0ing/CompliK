@@ -48,6 +48,8 @@ type BanResponse struct {
 	BanStartTime   time.Time  `json:"ban_start_time"`
 	BanEndTime     *time.Time `json:"ban_end_time,omitempty"`
 	OperatorName   string     `json:"operator_name"`
+	LabelActionStatus string  `json:"label_action_status,omitempty"`
+	LabelActionResult string  `json:"label_action_result,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
 }

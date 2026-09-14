@@ -75,6 +75,24 @@ func Get() *gorm.DB {
 	return client
 }
 
+// CheckReady verifies that the shared database connection is still usable.
+func CheckReady(ctx context.Context) error {
+	if client == nil {
+		return errors.New("database is not initialized")
+	}
+
+	sqlDB, err := client.DB()
+	if err != nil {
+		return fmt.Errorf("get sql db: %w", err)
+	}
+
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping database: %w", err)
+	}
+
+	return nil
+}
+
 // Close closes the shared database connection if it has been initialized.
 func Close() error {
 	if client == nil {

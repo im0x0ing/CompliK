@@ -20,10 +20,19 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) CreateViolation(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+
 	var req CreateViolationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"message": "invalid request body",
+		status := http.StatusBadRequest
+		message := "invalid request body"
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			status = http.StatusRequestEntityTooLarge
+			message = "request body is too large"
+		}
+		c.JSON(status, gin.H{
+			"message": message,
 			"error":   err.Error(),
 		})
 

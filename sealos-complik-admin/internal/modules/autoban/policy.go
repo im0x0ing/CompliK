@@ -49,10 +49,11 @@ type policyRepository interface {
 
 func defaultPolicy() Policy {
 	return Policy{
-		Enabled:      false,
-		DryRun:       true,
-		OperatorName: defaultOperatorName,
-		ReasonPrefix: defaultReasonPrefix,
+		Enabled:           false,
+		DryRun:            true,
+		OperatorName:      defaultOperatorName,
+		ReasonPrefix:      defaultReasonPrefix,
+		NamespaceDenylist: append([]string(nil), defaultNamespaceDenylist...),
 	}
 }
 
@@ -130,27 +131,27 @@ func decodePolicy(data []byte, policy *Policy) error {
 		policy.ReasonPrefix = raw.ReasonPrefixSnake
 	}
 
-	if len(raw.ProcessNameAllowlist) > 0 {
+	if raw.ProcessNameAllowlist != nil {
 		policy.ProcessNameAllowlist = raw.ProcessNameAllowlist
-	} else if len(raw.ProcessNameAllowlistSnake) > 0 {
+	} else if raw.ProcessNameAllowlistSnake != nil {
 		policy.ProcessNameAllowlist = raw.ProcessNameAllowlistSnake
 	}
 
-	if len(raw.ProcessNameDenylist) > 0 {
+	if raw.ProcessNameDenylist != nil {
 		policy.ProcessNameDenylist = raw.ProcessNameDenylist
-	} else if len(raw.ProcessNameDenylistSnake) > 0 {
+	} else if raw.ProcessNameDenylistSnake != nil {
 		policy.ProcessNameDenylist = raw.ProcessNameDenylistSnake
 	}
 
-	if len(raw.NamespaceAllowlist) > 0 {
+	if raw.NamespaceAllowlist != nil {
 		policy.NamespaceAllowlist = raw.NamespaceAllowlist
-	} else if len(raw.NamespaceAllowlistSnake) > 0 {
+	} else if raw.NamespaceAllowlistSnake != nil {
 		policy.NamespaceAllowlist = raw.NamespaceAllowlistSnake
 	}
 
-	if len(raw.NamespaceDenylist) > 0 {
+	if raw.NamespaceDenylist != nil {
 		policy.NamespaceDenylist = raw.NamespaceDenylist
-	} else if len(raw.NamespaceDenylistSnake) > 0 {
+	} else if raw.NamespaceDenylistSnake != nil {
 		policy.NamespaceDenylist = raw.NamespaceDenylistSnake
 	}
 
@@ -212,7 +213,29 @@ func normalizePolicy(policy *Policy) {
 	policy.ProcessNameAllowlist = trimStrings(policy.ProcessNameAllowlist)
 	policy.ProcessNameDenylist = trimStrings(policy.ProcessNameDenylist)
 	policy.NamespaceAllowlist = trimStrings(policy.NamespaceAllowlist)
-	policy.NamespaceDenylist = trimStrings(policy.NamespaceDenylist)
+	policy.NamespaceDenylist = mergeUniqueStrings(
+		defaultNamespaceDenylist,
+		trimStrings(policy.NamespaceDenylist),
+	)
+}
+
+func mergeUniqueStrings(groups ...[]string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, group := range groups {
+		for _, value := range group {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func trimStrings(values []string) []string {

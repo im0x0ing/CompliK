@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -35,6 +36,27 @@ type noopNamespaceLocker struct{}
 
 func NewNoopNamespaceLocker() NamespaceLocker {
 	return noopNamespaceLocker{}
+}
+
+// RetryableAttributionError marks a Kubernetes attribution lookup failure as
+// safe to retry. Identity mismatches remain ordinary errors and fail closed.
+type RetryableAttributionError struct {
+	Err error
+}
+
+func (e RetryableAttributionError) Error() string {
+	if e.Err == nil {
+		return "kubernetes attribution lookup failed"
+	}
+	return e.Err.Error()
+}
+
+func (e RetryableAttributionError) Unwrap() error {
+	return e.Err
+}
+
+func (RetryableAttributionError) Retryable() bool {
+	return true
 }
 
 func NewNamespaceLocker() (NamespaceLocker, error) {
@@ -67,6 +89,76 @@ func (l *namespaceLocker) EnsureUnlocked(ctx context.Context, namespace string) 
 	}
 
 	return l.ensureLabel(ctx, trimmedNamespace, false)
+}
+
+// CheckReady verifies Kubernetes API connectivity and the permissions needed
+// by the namespace locker.
+func (l *namespaceLocker) CheckReady(ctx context.Context) error {
+	if l == nil || l.client == nil {
+		return errors.New("kubernetes client is not initialized")
+	}
+
+	_, err := l.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		return fmt.Errorf("check kubernetes readiness: %w", err)
+	}
+
+	return nil
+}
+
+func (l *namespaceLocker) VerifyContainer(
+	ctx context.Context,
+	namespace string,
+	podName string,
+	podUID string,
+	containerID string,
+	nodeName string,
+) error {
+	namespace = strings.TrimSpace(namespace)
+	podName = strings.TrimSpace(podName)
+	podUID = strings.TrimSpace(podUID)
+	containerID = normalizeContainerID(containerID)
+	nodeName = strings.TrimSpace(nodeName)
+	if namespace == "" || podName == "" || podUID == "" || containerID == "" || nodeName == "" ||
+		strings.EqualFold(nodeName, "unknown") {
+		return errors.New("complete pod attribution is required")
+	}
+
+	pod, err := l.client.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return RetryableAttributionError{
+				Err: fmt.Errorf("get attributed pod: %w", err),
+			}
+		}
+		return fmt.Errorf("get attributed pod: %w", err)
+	}
+	if string(pod.UID) != podUID {
+		return errors.New("pod uid does not match")
+	}
+	if pod.Spec.NodeName != nodeName {
+		return errors.New("pod node does not match")
+	}
+
+	statuses := append(
+		append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...),
+		append(pod.Status.ContainerStatuses, pod.Status.EphemeralContainerStatuses...)...,
+	)
+	for _, status := range statuses {
+		if normalizeContainerID(status.ContainerID) == containerID {
+			return nil
+		}
+	}
+
+	return errors.New("container does not belong to pod")
+}
+
+func normalizeContainerID(value string) string {
+	value = strings.TrimSpace(value)
+	if index := strings.Index(value, "://"); index >= 0 {
+		return value[index+3:]
+	}
+	return value
 }
 
 func (l *namespaceLocker) ensureLabel(
@@ -159,4 +251,8 @@ func (noopNamespaceLocker) EnsureLocked(context.Context, string) (bool, error) {
 
 func (noopNamespaceLocker) EnsureUnlocked(context.Context, string) (bool, error) {
 	return false, nil
+}
+
+func (noopNamespaceLocker) CheckReady(context.Context) error {
+	return nil
 }
