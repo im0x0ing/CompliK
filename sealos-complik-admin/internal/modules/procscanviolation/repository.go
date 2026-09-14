@@ -66,7 +66,7 @@ func (r *Repository) GetViolationByEventID(
 func (r *Repository) WithEventIDLock(
 	ctx context.Context,
 	eventID string,
-	fn func(*ProcscanViolationEvent) error,
+	fn func(tx *gorm.DB, locked *ProcscanViolationEvent) error,
 ) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var violation ProcscanViolationEvent
@@ -76,12 +76,13 @@ func (r *Repository) WithEventIDLock(
 			return err
 		}
 
-		return fn(&violation)
+		return fn(tx, &violation)
 	})
 }
 
 func (r *Repository) UpdateAutobanDecisionIfAttempt(
 	ctx context.Context,
+	tx *gorm.DB,
 	id uint64,
 	status string,
 	reason string,
@@ -89,7 +90,11 @@ func (r *Repository) UpdateAutobanDecisionIfAttempt(
 	nextRetryAt *time.Time,
 	expectedAttemptCount int,
 ) (bool, error) {
-	result := r.db.WithContext(ctx).Model(&ProcscanViolationEvent{}).
+	if tx == nil {
+		return false, errors.New("missing transaction for autoban decision update")
+	}
+
+	result := tx.WithContext(ctx).Model(&ProcscanViolationEvent{}).
 		Where("id = ? AND autoban_attempt_count = ?", id, expectedAttemptCount).
 		Updates(map[string]any{
 			"autoban_status":        status,

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -71,7 +73,7 @@ func (s *Service) ReconcilePendingAutobans(ctx context.Context, limit int) error
 }
 
 func (s *Service) processAutobanUnderEventLock(ctx context.Context, eventID string) error {
-	return s.repository.WithEventIDLock(ctx, eventID, func(locked *ProcscanViolationEvent) error {
+	return s.repository.WithEventIDLock(ctx, eventID, func(tx *gorm.DB, locked *ProcscanViolationEvent) error {
 		now := s.now().UTC()
 		if !shouldRetryAutoban(locked, now) {
 			return nil
@@ -89,6 +91,7 @@ func (s *Service) processAutobanUnderEventLock(ctx context.Context, eventID stri
 
 		updated, err := s.repository.UpdateAutobanDecisionIfAttempt(
 			ctx,
+			tx,
 			locked.ID,
 			decision.Status,
 			decision.Reason,
