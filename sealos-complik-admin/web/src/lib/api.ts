@@ -1,3 +1,5 @@
+import { getBasicAuthHeader } from "./auth";
+import { parseListPayload } from "./list";
 import { formatDateTime, toTimestamp } from "./utils";
 import type {
   BanRecord,
@@ -375,6 +377,10 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
   if (shouldSetJSONContentType && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  const authorization = getBasicAuthHeader();
+  if (authorization && !headers.has("Authorization")) {
+    headers.set("Authorization", authorization);
+  }
 
   let response: Response;
   try {
@@ -604,8 +610,8 @@ function toDiscoveredPathRecord(item: DiscoveredPathDto): DiscoveredPathRecord {
 }
 
 export async function listConfigRecords() {
-  const data = await request<ProjectConfigDto[]>("/api/configs");
-  return data.map(toConfigRecord);
+  const data = await request<unknown>("/api/configs");
+  return parseListPayload<ProjectConfigDto>(data).map(toConfigRecord);
 }
 
 export async function listConfigRecordsPage(query: RecordListQuery): Promise<PaginatedRecords<ConfigRecord>> {
@@ -644,8 +650,8 @@ export async function updateConfigRecord(configName: string, input: UpdateConfig
 }
 
 export async function listCommitmentRecords() {
-  const data = await request<CommitmentDto[]>("/api/commitments");
-  return data.map(toCommitmentRecord);
+  const data = await request<unknown>("/api/commitments");
+  return parseListPayload<CommitmentDto>(data).map(toCommitmentRecord);
 }
 
 export async function listCommitmentRecordsPage(query: RecordListQuery): Promise<PaginatedRecords<CommitmentRecord>> {
@@ -699,8 +705,8 @@ export function buildBanScreenshotPreviewURL(fileURL: string) {
 }
 
 export async function listBanRecords() {
-  const data = await request<BanDto[]>("/api/bans");
-  return data.map(toBanRecord);
+  const data = await request<unknown>("/api/bans");
+  return parseListPayload<BanDto>(data).map(toBanRecord);
 }
 
 export async function listBanRecordsPage(query: RecordListQuery): Promise<PaginatedRecords<BanRecord>> {
@@ -767,8 +773,8 @@ export async function deleteBanRecord(id: number) {
 }
 
 export async function listUnbanRecords() {
-  const data = await request<UnbanDto[]>("/api/unbans");
-  return data.map(toUnbanRecord);
+  const data = await request<unknown>("/api/unbans");
+  return parseListPayload<UnbanDto>(data).map(toUnbanRecord);
 }
 
 export async function listUnbanRecordsPage(query: RecordListQuery): Promise<PaginatedRecords<UnbanRecord>> {
@@ -794,13 +800,13 @@ export async function deleteUnbanRecord(id: number) {
 
 export async function listViolationRecords() {
   const [complikData, procscanData] = await Promise.all([
-    request<ComplikViolationDto[]>("/api/complik-violations"),
-    request<ProcscanViolationDto[]>("/api/procscan-violations"),
+    request<unknown>("/api/complik-violations"),
+    request<unknown>("/api/procscan-violations"),
   ]);
 
   return [
-    ...complikData.filter(isComplikIllegal).map(toComplikViolationRecord),
-    ...procscanData.filter(isProcscanIllegal).map(toProcscanViolationRecord),
+    ...parseListPayload<ComplikViolationDto>(complikData).filter(isComplikIllegal).map(toComplikViolationRecord),
+    ...parseListPayload<ProcscanViolationDto>(procscanData).filter(isProcscanIllegal).map(toProcscanViolationRecord),
   ].sort((a, b) => toTimestamp(b.detectedAt) - toTimestamp(a.detectedAt));
 }
 

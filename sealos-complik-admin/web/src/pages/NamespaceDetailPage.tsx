@@ -16,6 +16,8 @@ import {
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { useAppData } from "../contexts/AppDataContext";
 import { buildCommitmentDownloadURL } from "../lib/api";
+import { banCreatePath, unbanCreatePath } from "../lib/tenantActions";
+import { isLockableTenantNamespace } from "../lib/tenantNamespace";
 import { formatURLWithDeviceProfile, formatViolationTypeLabel, paginateItems, summarizeMarkdown } from "../lib/utils";
 import type { ViolationRecord } from "../types";
 
@@ -105,6 +107,16 @@ export function NamespaceDetailPage() {
         description="先判断违规记录、封禁和承诺书情况，再回看最近违规和处置时间线。"
         actions={
           <>
+            {isLockableTenantNamespace(profile.namespace) ? (
+              <>
+                <Button variant="primary" onClick={() => navigate(banCreatePath(profile.namespace))}>
+                  封禁此租户
+                </Button>
+                <Button variant="secondary" onClick={() => navigate(unbanCreatePath(profile.namespace))}>
+                  解封此租户
+                </Button>
+              </>
+            ) : null}
             <Button
               variant="secondary"
               onClick={() =>

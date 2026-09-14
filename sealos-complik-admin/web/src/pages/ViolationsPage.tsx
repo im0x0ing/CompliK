@@ -17,6 +17,8 @@ import {
 } from "../components/ui";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { deleteViolationRecord as apiDeleteViolationRecord, listViolationRecordsPage } from "../lib/api";
+import { banCreatePath } from "../lib/tenantActions";
+import { isLockableTenantNamespace } from "../lib/tenantNamespace";
 import { formatURLWithDeviceProfile, formatViolationTypeLabel } from "../lib/utils";
 import type { PaginatedViolationRecords, ViolationRecord, ViolationScope, ViolationTimeRange, ViolationType } from "../types";
 
@@ -300,6 +302,17 @@ export function ViolationsPage() {
               {selected.namespace ? (
                 <Button variant="secondary" onClick={() => navigate(`/namespaces/${encodeURIComponent(selected.namespace)}`)}>
                   查看 namespace 详情
+                </Button>
+              ) : null}
+              {selected.namespace && isLockableTenantNamespace(selected.namespace) ? (
+                <Button
+                  variant="primary"
+                  onClick={() =>
+                    navigate(banCreatePath(selected.namespace, selected.processName
+                      ? `进程违规：${selected.processName}`
+                      : selected.description))}
+                >
+                  封禁此租户
                 </Button>
               ) : null}
               <Button variant="danger" onClick={() => setPendingDelete(selected)}>

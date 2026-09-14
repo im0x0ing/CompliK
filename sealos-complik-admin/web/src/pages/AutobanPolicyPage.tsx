@@ -24,6 +24,7 @@ import {
   validateProcscanRuleSet,
 } from "../lib/api";
 import type { AutobanPolicy, ProcscanRule, ProcscanRuleSet, ViolationRecord } from "../types";
+import { isKubernetesNamespace, isLockableTenantNamespace, tenantNamespaceHint } from "../lib/tenantNamespace";
 
 type ManagedRule = {
   id: string;
@@ -104,7 +105,7 @@ function isExactProcessNamePattern(pattern: string) {
 }
 
 function isValidNamespace(value: string) {
-  return value.length <= 63 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(value);
+  return isKubernetesNamespace(value);
 }
 
 function fallbackRuleSet(processNames: string[]): ProcscanRuleSet {
@@ -129,8 +130,8 @@ function NamespacePicker({
 
   const addValue = () => {
     const namespace = draft.trim();
-    if (!isValidNamespace(namespace)) {
-      onError("Namespace 必须符合 Kubernetes 命名格式：小写字母、数字或连字符。");
+    if (!isLockableTenantNamespace(namespace)) {
+      onError("只能放开租户 Namespace（必须以 ns- 开头）。");
       return;
     }
     onChange(normalizeValues([...values, namespace]));
@@ -143,7 +144,7 @@ function NamespacePicker({
       <Input
         aria-label="放开 Namespace"
         onChange={(event) => setDraft(event.target.value)}
-        placeholder="选择或输入 Namespace"
+        placeholder="例如 ns-user-abc"
         value={draft}
       />
       <button aria-label="放开 Namespace" className="icon-btn" onClick={addValue} type="button">
@@ -187,6 +188,7 @@ export function AutobanPolicyPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmedExecution, setConfirmedExecution] = useState(false);
+  const [initialRuleSet, setInitialRuleSet] = useState<ProcscanRuleSet | null>(null);
   const [recentHits, setRecentHits] = useState<ViolationRecord[]>([]);
   const [recentHitsLoading, setRecentHitsLoading] = useState(false);
 
@@ -216,7 +218,7 @@ export function AutobanPolicyPage() {
         page: 1,
         keyword: "",
         scope: "violations",
-        timeRange: "7d",
+        timeRange: "30d",
         type: "procscan",
       });
       setRecentHits(page.list.slice(0, 10));
@@ -240,6 +242,7 @@ export function AutobanPolicyPage() {
       try {
         const nextRuleSet = await loadProcscanRuleSet();
         setRuleSet(nextRuleSet);
+        setInitialRuleSet(nextRuleSet);
         setRuleApiAvailable(true);
         try {
           const writesEnabled = await loadProcscanRulesStatus();
@@ -254,13 +257,18 @@ export function AutobanPolicyPage() {
           setRulesError("无法确认 Procscan 规则写入状态，当前按只读模式处理；仍可保存自动封禁策略。");
         }
       } catch (ruleError) {
-   if (!(ruleError instanceof ApiRequestError && ruleError.status === 404)) {
-     throw ruleError;
-   }
-        setRuleSet(fallbackRuleSet(nextPolicy.processNameAllowlist));
-        setRuleApiAvailable(false);
-        setRuleWritesEnabled(false);
-        setRulesError("当前 Admin 尚未提供 Procscan 规则接口，已使用自动封禁策略名单兼容加载。");
+        const fallback = fallbackRuleSet(nextPolicy.processNameAllowlist);
+        setRuleSet(fallback);
+        setInitialRuleSet(fallback);
+        if (ruleError instanceof ApiRequestError && ruleError.status === 404) {
+          setRuleApiAvailable(false);
+          setRuleWritesEnabled(false);
+          setRulesError("当前 Admin 尚未提供 Procscan 规则接口，已使用自动封禁策略名单兼容加载。");
+        } else {
+          setRuleApiAvailable(false);
+          setRuleWritesEnabled(false);
+          setRulesError(ruleError instanceof Error ? `Procscan 规则加载失败：${ruleError.message}` : "Procscan 规则加载失败。");
+        }
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "自动封禁配置加载失败");
@@ -376,6 +384,7 @@ export function AutobanPolicyPage() {
       }
       await saveAutobanPolicy(nextPolicy, policyExists);
       setRuleSet(savedRuleSet);
+      setInitialRuleSet(savedRuleSet);
       setPolicy(nextPolicy);
       setInitialPolicy(clonePolicy(nextPolicy));
       setPolicyExists(true);
@@ -413,21 +422,48 @@ export function AutobanPolicyPage() {
     void persist();
   };
 
+  const isDirty =
+    JSON.stringify(policy) !== JSON.stringify(initialPolicy) ||
+    JSON.stringify(ruleSet) !== JSON.stringify(initialRuleSet);
+
+  useEffect(() => {
+    if (!isDirty) {
+      return;
+    }
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty]);
+
   if (isLoading) {
-    return <div className="page-container"><PageHeader kicker="Autoban" title="自动封禁" description="正在读取策略与 Procscan 规则。" /></div>;
+    return (
+      <div className="page-container">
+        <PageHeader kicker="Autoban" title="自动封禁" description="正在读取策略与 Procscan 规则。" />
+        <EmptyState
+          title="正在加载自动封禁配置"
+          description="如果超过十几秒仍未结束，请刷新页面重试。"
+          action={<Button variant="secondary" onClick={() => void load()}>重试</Button>}
+        />
+      </div>
+    );
   }
 
   return (
     <div className="page-container autoban-page">
       <PageHeader
-        kicker="Procscan"
-        title="高风险进程"
-        description="命中下列进程规则后，可按策略封禁所在 Namespace。"
+        kicker="Autoban"
+        title="自动封禁"
+        description="只处理进程扫描命中。内容违规不会自动封禁。命中后只锁 ns- 开头的租户 Namespace。"
         actions={<Button disabled={isSaving || !ruleSet} onClick={handleSave} variant="primary">{isSaving ? "保存中..." : "保存变更"}</Button>}
       />
 
       {error ? <div className="policy-message policy-message-danger" role="alert">{error}</div> : null}
       {notice ? <div className="policy-message policy-message-success" role="status">{notice}</div> : null}
+      {isDirty ? <div className="policy-message policy-message-warn" role="status">有未保存的修改，离开页面前请先保存。</div> : null}
+      {isExecuting ? <div className="policy-message policy-message-danger" role="alert">当前是自动执行：命中高风险进程后会立刻封禁对应租户 Namespace。</div> : null}
 
       <section className="autoban-policy-bar" aria-label="自动封禁策略">
         <div className="autoban-execution-field">
@@ -439,7 +475,11 @@ export function AutobanPolicyPage() {
           </div>
         </div>
         <div className="autoban-policy-note">
-          {executionMode === "off" ? "不处理命中事件。" : executionMode === "observe" ? "命中只记录，不执行封禁。" : "命中后封禁所在 Namespace。"}
+          {executionMode === "off"
+            ? "不处理命中事件。"
+            : executionMode === "observe"
+              ? "命中只记录，不执行封禁。先用这一档核对规则。"
+              : "命中后封禁该进程所在的租户 Namespace（仅 ns- 开头）。"}
         </div>
       </section>
 
@@ -448,7 +488,7 @@ export function AutobanPolicyPage() {
           <div className="autoban-section-header">
             <div>
               <h2 id="autoban-rules-title">自动封禁进程</h2>
-              <p>列表中的精确进程名命中后，可触发 Namespace 封禁。</p>
+              <p>只支持精确进程名，例如 xmrig。命令行关键词和其他扫描规则不会出现在这张表里。</p>
             </div>
             <StatusPill tone={ruleApiAvailable ? (ruleWritesEnabled ? "info" : "warn") : "neutral"}>
               {!ruleApiAvailable ? "兼容模式" : ruleWritesEnabled ? "V2 规则" : "V2 只读"}
@@ -505,11 +545,11 @@ export function AutobanPolicyPage() {
               }}
               value={scopeMode}
             >
-              <option value="cluster">整个集群</option>
+              <option value="cluster">全部租户 Namespace（ns-）</option>
               <option value="namespaces">指定 Namespace</option>
             </Select>
           </div>
-          <p className="scope-mode-summary">{scopeMode === "cluster" ? "所有 Namespace，排除列表除外。" : "只对下列 Namespace 生效。"}</p>
+          <p className="scope-mode-summary">{scopeMode === "cluster" ? tenantNamespaceHint() : "只对下列 ns- Namespace 生效。"}</p>
           {scopeMode === "namespaces" ? (
             <>
               <Field label="放开 Namespace"><NamespacePicker onChange={(namespaceAllowlist) => updatePolicy((current) => ({ ...current, namespaceAllowlist }))} onError={setError} values={policy.namespaceAllowlist} /></Field>
@@ -557,7 +597,7 @@ export function AutobanPolicyPage() {
           </div>
         ) : recentHits.length === 0 ? (
           <div style={{ padding: 20 }}>
-            <EmptyState title="最近 7 天暂无进程命中" description="命中高风险进程后，这里会显示进程名和对应 Namespace。" />
+            <EmptyState title="最近 30 天暂无进程命中" description="命中高风险进程后，这里会显示进程名和对应 Namespace。若刚保存规则，可能需要等下一轮扫描。" />
           </div>
         ) : (
           <div className="autoban-rule-table-wrap" style={{ padding: "0 20px 20px" }}>
@@ -597,7 +637,7 @@ export function AutobanPolicyPage() {
 
       <Modal description="命中这些进程后，将封禁该进程所在的整个 Namespace。" onClose={() => { setConfirmOpen(false); setConfirmedExecution(false); }} open={confirmOpen} title="确认启用自动执行">
         <div className="panel-stack">
-          <div className="confirmation-summary"><div><span className="detail-label">生效范围</span><strong>{scopeMode === "cluster" ? "整个集群" : policy.namespaceAllowlist.join("、")}</strong></div><div><span className="detail-label">排除 Namespace</span><strong>{policy.namespaceDenylist.join("、") || "无"}</strong></div><div><span className="detail-label">高风险进程</span><strong>{managedRules.map((rule) => toExactProcessName(rule.pattern)).join("、")}</strong></div></div>
+          <div className="confirmation-summary"><div><span className="detail-label">生效范围</span><strong>{scopeMode === "cluster" ? "全部租户 Namespace（ns-）" : policy.namespaceAllowlist.join("、")}</strong></div><div><span className="detail-label">排除 Namespace</span><strong>{policy.namespaceDenylist.join("、") || "无"}</strong></div><div><span className="detail-label">高风险进程</span><strong>{managedRules.map((rule) => toExactProcessName(rule.pattern)).join("、")}</strong></div></div>
           <label className="confirmation-check"><input checked={confirmedExecution} onChange={(event) => setConfirmedExecution(event.target.checked)} type="checkbox" /><span>我确认命中后会封禁整个 Namespace。</span></label>
           <div className="button-row"><Button disabled={!confirmedExecution || isSaving} onClick={() => void persist()} variant="danger">{isSaving ? "保存中..." : "确认并启用"}</Button><Button onClick={() => { setConfirmOpen(false); setConfirmedExecution(false); }} variant="secondary">取消</Button></div>
         </div>

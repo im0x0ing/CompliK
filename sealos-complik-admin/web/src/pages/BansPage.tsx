@@ -19,7 +19,9 @@ import { MarkdownRenderer } from "../components/MarkdownRenderer";
 import { useAppData } from "../contexts/AppDataContext";
 import { useManagedOperatorOptions } from "../hooks/useOperatorOptions";
 import { buildBanScreenshotPreviewURL, listBanRecordsPage } from "../lib/api";
-import { summarizeMarkdown } from "../lib/utils";
+import { unbanCreatePath } from "../lib/tenantActions";
+import { isLockableTenantNamespace, tenantNamespaceHint } from "../lib/tenantNamespace";
+import { summarizeMarkdown, toDatetimeLocalValue } from "../lib/utils";
 import type { BanRecord, PaginatedRecords } from "../types";
 
 export function BansPage() {
@@ -80,8 +82,15 @@ export function BansPage() {
   }, [screenshotPreviews]);
 
   useEffect(() => {
-    setKeyword(searchParams.get("namespace") ?? "");
+    const namespaceFromQuery = searchParams.get("namespace") ?? "";
+    setKeyword(namespaceFromQuery);
     setPage(1);
+    if (searchParams.get("create") === "1" && namespaceFromQuery) {
+      setNamespace(namespaceFromQuery);
+      setReason(searchParams.get("reason") ?? "");
+      setBanStartTime(toDatetimeLocalValue(new Date().toISOString()));
+      setOpen(true);
+    }
   }, [searchParams]);
 
   const loadRows = useCallback(async () => {
@@ -158,6 +167,10 @@ export function BansPage() {
 
   const handleCreateBan = async () => {
     if (submitting) {
+      return;
+    }
+    if (!isLockableTenantNamespace(namespace.trim())) {
+      setFormError(tenantNamespaceHint());
       return;
     }
     if (!namespace.trim() || !reason.trim() || !banStartTime.trim() || !operatorName.trim()) {
@@ -281,6 +294,9 @@ export function BansPage() {
                     <Button variant="ghost" onClick={() => setSelected(item)}>
                       查看
                     </Button>
+                    <Button variant="secondary" onClick={() => navigate(unbanCreatePath(item.namespace))}>
+                      解封
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -353,6 +369,9 @@ export function BansPage() {
               )}
             </div>
             <div className="button-row" style={{ marginTop: 20 }}>
+              <Button variant="primary" onClick={() => navigate(unbanCreatePath(selected.namespace))}>
+                解封此租户
+              </Button>
               <Button variant="secondary" onClick={() => navigate(`/namespaces/${selected.namespace}`)}>
                 查看 namespace 详情
               </Button>
@@ -376,8 +395,9 @@ export function BansPage() {
       >
         <div className="panel-stack">
           <Field label="namespace">
-            <Input placeholder="例如：prod-finance" value={namespace} onChange={(event) => setNamespace(event.target.value)} />
+            <Input placeholder="例如 ns-user-abc" value={namespace} onChange={(event) => setNamespace(event.target.value)} />
           </Field>
+          <p className="muted-text">{tenantNamespaceHint()}</p>
           <Field label="描述（TXT）">
             <div className="plain-text-input-shell">
               <textarea

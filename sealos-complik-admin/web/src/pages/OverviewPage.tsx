@@ -7,7 +7,7 @@ import { paginateItems } from "../lib/utils";
 
 export function OverviewPage() {
   const navigate = useNavigate();
-  const { latestActions, latestViolations, quickLinks, refreshAll, stats } = useAppData();
+  const { error, latestActions, latestViolations, quickLinks, refreshAll, stats } = useAppData();
   const [violationPage, setViolationPage] = useState(1);
   const [actionPage, setActionPage] = useState(1);
   const paginatedViolations = useMemo(() => paginateItems(latestViolations, violationPage), [latestViolations, violationPage]);
@@ -25,6 +25,8 @@ export function OverviewPage() {
           </Button>
         }
       />
+
+      {error ? <div className="policy-message policy-message-danger" role="alert">{error}</div> : null}
 
       <section className="stat-grid">
         {stats.map((item) => (

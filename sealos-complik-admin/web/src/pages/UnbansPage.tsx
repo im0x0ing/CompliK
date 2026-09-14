@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button,
@@ -16,27 +16,21 @@ import {
 } from "../components/ui";
 import { useAppData } from "../contexts/AppDataContext";
 import { useManagedOperatorOptions } from "../hooks/useOperatorOptions";
-import { listUnbanRecordsPage } from "../lib/api";
-import type { PaginatedRecords, UnbanRecord } from "../types";
+import { isLockableTenantNamespace, tenantNamespaceHint } from "../lib/tenantNamespace";
+import { timeRangeStartMs, type ListTimeRange } from "../lib/timeRange";
+import { paginateItems } from "../lib/utils";
+import type { UnbanRecord } from "../types";
 
 export function UnbansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { banRecords, configRecords, createUnbanRecord, unbanRecords, deleteUnbanRecord } = useAppData();
+  const { banRecords, configRecords, createUnbanRecord, error, isLoading, refreshAll, unbanRecords, deleteUnbanRecord } = useAppData();
   const [selected, setSelected] = useState<UnbanRecord | null>(null);
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState(() => searchParams.get("namespace") ?? "");
   const [operatorFilter, setOperatorFilter] = useState("");
+  const [timeRange, setTimeRange] = useState<ListTimeRange>("all");
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<PaginatedRecords<UnbanRecord>>({
-    list: [],
-    total: 0,
-    page: 1,
-    pageSize: 10,
-    totalPages: 0,
-  });
-  const [listError, setListError] = useState<string | null>(null);
-  const [isListLoading, setIsListLoading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<UnbanRecord | null>(null);
   const [namespace, setNamespace] = useState("");
   const [operatorName, setOperatorName] = useState("");
@@ -49,45 +43,35 @@ export function UnbansPage() {
   ]);
 
   useEffect(() => {
-    setKeyword(searchParams.get("namespace") ?? "");
+    const namespaceFromQuery = searchParams.get("namespace") ?? "";
+    setKeyword(namespaceFromQuery);
     setPage(1);
+    if (searchParams.get("create") === "1" && namespaceFromQuery) {
+      setNamespace(namespaceFromQuery);
+      setOpen(true);
+    }
   }, [searchParams]);
 
-  const loadRows = useCallback(async () => {
-    setIsListLoading(true);
-    setListError(null);
-    try {
-      const nextData = await listUnbanRecordsPage({
-        page,
-        keyword,
-        operatorName: operatorFilter,
-      });
-      if (nextData.totalPages > 0 && page > nextData.totalPages) {
-        setPage(nextData.totalPages);
-        return;
+  const filtered = useMemo(() => {
+    const start = timeRangeStartMs(timeRange);
+    const needle = keyword.trim().toLowerCase();
+    return unbanRecords.filter((item) => {
+      if (needle && !item.namespace.toLowerCase().includes(needle)) {
+        return false;
       }
-      setData(nextData);
-    } catch (err) {
-      setListError(err instanceof Error ? err.message : "解封记录加载失败");
-      setData({
-        list: [],
-        total: 0,
-        page,
-        pageSize: 10,
-        totalPages: 0,
-      });
-    } finally {
-      setIsListLoading(false);
-    }
-  }, [keyword, operatorFilter, page]);
-
-  useEffect(() => {
-    void loadRows();
-  }, [loadRows]);
-
-  const rows = data.list;
+      if (operatorFilter && item.operatorName !== operatorFilter) {
+        return false;
+      }
+      return item.createdAtMs >= start;
+    });
+  }, [keyword, operatorFilter, timeRange, unbanRecords]);
+  const paginated = useMemo(() => paginateItems(filtered, page), [filtered, page]);
 
   const handleCreateUnban = async () => {
+    if (!isLockableTenantNamespace(namespace.trim())) {
+      setFormError(tenantNamespaceHint());
+      return;
+    }
     if (!namespace.trim() || !operatorName.trim()) {
       setFormError("namespace 和操作人均为必填。");
       return;
@@ -103,7 +87,7 @@ export function UnbansPage() {
       setOpen(false);
       setNamespace("");
       setOperatorName("");
-      await loadRows();
+      await refreshAll();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "新增解封记录失败");
     } finally {
@@ -149,29 +133,36 @@ export function UnbansPage() {
             </Select>
           </Field>
           <Field label="时间范围">
-            <Select defaultValue="7d">
+            <Select
+              value={timeRange}
+              onChange={(event) => {
+                setTimeRange(event.target.value as ListTimeRange);
+                setPage(1);
+              }}
+            >
               <option value="24h">最近 24 小时</option>
               <option value="7d">最近 7 天</option>
               <option value="30d">最近 30 天</option>
+              <option value="all">全部时间</option>
             </Select>
           </Field>
         </div>
       </SurfaceCard>
 
       <SurfaceCard className="data-table-wrap" padded={false}>
-        {listError ? (
+        {error ? (
           <div style={{ padding: 20 }}>
             <EmptyState
               title="解封记录加载失败"
-              description={listError}
-              action={<Button variant="secondary" onClick={() => void loadRows()}>重新加载</Button>}
+              description={error}
+              action={<Button variant="secondary" onClick={() => void refreshAll()}>重新加载</Button>}
             />
           </div>
-        ) : isListLoading ? (
+        ) : isLoading ? (
           <div style={{ padding: 20 }}>
             <EmptyState title="解封记录加载中" description="正在同步当前页数据。" />
           </div>
-        ) : rows.length > 0 ? (
+        ) : paginated.list.length > 0 ? (
           <table className="data-table">
             <thead>
               <tr>
@@ -182,7 +173,7 @@ export function UnbansPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((item) => (
+              {paginated.list.map((item) => (
                 <tr key={item.id}>
                   <td>
                     <button className="namespace-link table-row-button" onClick={() => navigate(`/namespaces/${item.namespace}`)} type="button">
@@ -216,10 +207,10 @@ export function UnbansPage() {
       </SurfaceCard>
 
       <PaginationControls
-        page={page}
-        pageSize={data.pageSize}
-        total={data.total}
-        totalPages={data.totalPages}
+        page={paginated.page}
+        pageSize={paginated.pageSize}
+        total={paginated.total}
+        totalPages={paginated.totalPages}
         onPageChange={setPage}
       />
 
@@ -261,8 +252,9 @@ export function UnbansPage() {
       >
         <div className="panel-stack">
           <Field label="namespace">
-            <Input placeholder="例如：growth-ops" value={namespace} onChange={(event) => setNamespace(event.target.value)} />
+            <Input placeholder="例如 ns-user-abc" value={namespace} onChange={(event) => setNamespace(event.target.value)} />
           </Field>
+          <p className="muted-text">{tenantNamespaceHint()}</p>
           <Field label="操作人">
             <Select value={operatorName} onChange={(event) => setOperatorName(event.target.value)}>
               <option value="">请选择操作人</option>
@@ -301,12 +293,12 @@ export function UnbansPage() {
         onClose={() => setPendingDelete(null)}
         onConfirm={() => {
           if (!pendingDelete) return;
-          void deleteUnbanRecord(pendingDelete.apiId).then(() => {
+            void deleteUnbanRecord(pendingDelete.apiId).then(() => {
             if (selected?.id === pendingDelete.id) {
               setSelected(null);
             }
             setPendingDelete(null);
-            void loadRows();
+            void refreshAll();
           });
         }}
         open={Boolean(pendingDelete)}

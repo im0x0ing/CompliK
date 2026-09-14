@@ -15,6 +15,7 @@ import {
 } from "../components/ui";
 import { useAppData } from "../contexts/AppDataContext";
 import { listConfigRecordsPage } from "../lib/api";
+import { maskSensitiveJson } from "../lib/secrets";
 import type { ConfigRecord, CreateConfigInput, PaginatedRecords } from "../types";
 
 type ImportConfigRecord = {
@@ -423,8 +424,9 @@ export function ConfigsPage() {
               ]}
             />
             <div style={{ marginTop: 20 }}>
-              <div className="detail-label" style={{ marginBottom: 8 }}>JSON 内容</div>
-              <pre className="code-block">{selected.value}</pre>
+              <div className="detail-label" style={{ marginBottom: 8 }}>JSON 内容（密钥已隐藏）</div>
+              <pre className="code-block">{maskSensitiveJson(selected.value)}</pre>
+              <p className="muted-text">查看时不会展示完整密钥。修改配置时编辑框仍是原文，请谨慎复制。</p>
             </div>
             <div className="button-row" style={{ marginTop: 20 }}>
               <Button variant="secondary" onClick={() => openEditModal(selected)}>
