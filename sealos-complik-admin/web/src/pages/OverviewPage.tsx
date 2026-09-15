@@ -7,7 +7,7 @@ import { paginateItems } from "../lib/utils";
 
 export function OverviewPage() {
   const navigate = useNavigate();
-  const { error, latestActions, latestViolations, quickLinks, refreshAll, stats } = useAppData();
+  const { error, latestActions, latestViolations, refreshAll, stats } = useAppData();
   const [violationPage, setViolationPage] = useState(1);
   const [actionPage, setActionPage] = useState(1);
   const paginatedViolations = useMemo(() => paginateItems(latestViolations, violationPage), [latestViolations, violationPage]);
@@ -134,21 +134,6 @@ export function OverviewPage() {
         </SurfaceCard>
       </section>
 
-      <section className="quick-links-grid">
-        {quickLinks.map((item) => (
-          <SurfaceCard className="quick-link-card" key={item.title}>
-            <div>
-              <h2 className="section-title">{item.title}</h2>
-              <p className="section-subtitle">{item.description}</p>
-            </div>
-            <div className="button-row">
-              <Button variant="secondary" onClick={() => navigate(item.targetPath)}>
-                进入页面
-              </Button>
-            </div>
-          </SurfaceCard>
-        ))}
-      </section>
     </div>
   );
 }

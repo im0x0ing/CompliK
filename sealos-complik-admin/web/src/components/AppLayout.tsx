@@ -16,7 +16,7 @@ import { cn } from "../lib/utils";
 
 const navGroups = [
   {
-    label: "值班",
+    label: "",
     items: [
       { label: "总览", path: "/overview", icon: LayoutGrid },
       { label: "违规中心", path: "/violations", icon: AlertTriangle },
@@ -49,8 +49,8 @@ export function AppLayout() {
         </div>
         <nav className="nav-list" aria-label="主导航">
           {navGroups.map((group) => (
-            <div className="nav-group" key={group.label}>
-              <p className="nav-group-label">{group.label}</p>
+            <div className="nav-group" key={group.label || "main"}>
+              {group.label ? <p className="nav-group-label">{group.label}</p> : null}
               {group.items.map((item) => {
                 const Icon = item.icon;
                 return (

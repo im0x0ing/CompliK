@@ -95,13 +95,18 @@ function createRule(pattern: string): ProcscanRule {
 }
 
 function toExactProcessName(pattern: string) {
-  const exact = pattern.match(/^\^(.+)\$$/);
-  return exact?.[1] ?? pattern;
+  const trimmed = pattern.trim();
+  const flagged = trimmed.match(/^\(\?[iI]\)\^(.+)\$$/);
+  if (flagged?.[1]) {
+    return flagged[1];
+  }
+  const exact = trimmed.match(/^\^(.+)\$$/);
+  return exact?.[1] ?? trimmed;
 }
 
 function isExactProcessNamePattern(pattern: string) {
   const processName = toExactProcessName(pattern).trim();
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(processName) && pattern === `^${processName}$`;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(processName);
 }
 
 function isValidNamespace(value: string) {
@@ -154,16 +159,13 @@ function NamespacePicker({
   );
 }
 
-function getAutobanLabel(status?: string) {
-  return status === "submitted"
-    ? "已提交封禁"
-    : status === "dry_run"
-      ? "观察模式命中"
-      : status === "not_triggered"
-        ? "未触发封禁"
-        : status === "failed"
-          ? "封禁提交失败"
-          : status || "-";
+function getAutobanLabel(status?: string, executionMode?: ExecutionMode) {
+  if (status === "submitted") return "已提交封禁";
+  if (status === "dry_run") return "观察模式命中";
+  if (status === "failed") return "封禁提交失败";
+  if (executionMode === "observe") return "观察中未封禁";
+  if (executionMode === "off") return "自动封禁已关闭";
+  return status === "not_triggered" ? "未触发封禁" : status || "-";
 }
 
 function getNamespaceLabel(namespace?: string) {
@@ -191,6 +193,7 @@ export function AutobanPolicyPage() {
   const [initialRuleSet, setInitialRuleSet] = useState<ProcscanRuleSet | null>(null);
   const [recentHits, setRecentHits] = useState<ViolationRecord[]>([]);
   const [recentHitsLoading, setRecentHitsLoading] = useState(false);
+  const [denylistSaving, setDenylistSaving] = useState(false);
 
   const managedRules = useMemo(() => getManagedRules(ruleSet), [ruleSet]);
   const filteredManagedRules = useMemo(() => {
@@ -198,11 +201,6 @@ export function AutobanPolicyPage() {
     if (!keyword) return managedRules;
     return managedRules.filter((rule) => toExactProcessName(rule.pattern).toLowerCase().includes(keyword));
   }, [managedRules, processNameDraft]);
-  const filteredNamespaceDenylist = useMemo(() => {
-    const keyword = namespaceDenylistDraft.trim().toLowerCase();
-    if (!keyword) return policy.namespaceDenylist;
-    return policy.namespaceDenylist.filter((namespace) => namespace.toLowerCase().includes(keyword));
-  }, [namespaceDenylistDraft, policy.namespaceDenylist]);
   const isExecuting = policy.enabled && !policy.dryRun;
   const executionMode: ExecutionMode = !policy.enabled ? "off" : policy.dryRun ? "observe" : "execute";
   const protectedTargets = policy.namespaceAllowlist.filter((namespace) => policy.namespaceDenylist.includes(namespace));
@@ -218,7 +216,7 @@ export function AutobanPolicyPage() {
         page: 1,
         keyword: "",
         scope: "violations",
-        timeRange: "30d",
+        timeRange: "all",
         type: "procscan",
       });
       setRecentHits(page.list.slice(0, 10));
@@ -325,6 +323,27 @@ export function AutobanPolicyPage() {
     setNotice(null);
   };
 
+  const persistNamespaceDenylist = async (namespaceDenylist: string[]) => {
+    setDenylistSaving(true);
+    setError(null);
+    try {
+      const policyRecord = await loadAutobanPolicy();
+      const nextPolicy = normalizePolicy({
+        ...policyRecord.policy,
+        namespaceDenylist,
+      });
+      await saveAutobanPolicy(nextPolicy, policyRecord.exists);
+      setPolicyExists(true);
+      setPolicy((current) => ({ ...current, namespaceDenylist }));
+      setInitialPolicy((current) => ({ ...current, namespaceDenylist }));
+      setNotice("排除 Namespace 已单独保存，不会随执行模式一起改掉。");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "排除 Namespace 保存失败");
+    } finally {
+      setDenylistSaving(false);
+    }
+  };
+
   const addNamespaceDenylist = () => {
     const namespace = namespaceDenylistDraft.trim();
     if (!canAddNamespaceDenylist) {
@@ -335,11 +354,12 @@ export function AutobanPolicyPage() {
       setError("Namespace 必须符合 Kubernetes 命名格式：小写字母、数字或连字符。");
       return;
     }
-    updatePolicy((current) => ({
-      ...current,
-      namespaceDenylist: [...current.namespaceDenylist, namespace],
-    }));
     setNamespaceDenylistDraft("");
+    void persistNamespaceDenylist([...policy.namespaceDenylist, namespace]);
+  };
+
+  const removeNamespaceDenylist = (namespace: string) => {
+    void persistNamespaceDenylist(policy.namespaceDenylist.filter((item) => item !== namespace));
   };
 
   const validate = () => {
@@ -368,12 +388,12 @@ export function AutobanPolicyPage() {
     setIsSaving(true);
     setError(null);
     try {
+      const policyRecord = await loadAutobanPolicy();
       const nextPolicy = normalizePolicy({
         ...policy,
         namespaceAllowlist: scopeMode === "cluster" ? [] : policy.namespaceAllowlist,
-        // V2 rules are authoritative when the rule API is available. Keep the
-        // legacy field only for old Admin versions that have no V2 endpoint.
-        processNameAllowlist: ruleApiAvailable ? [] : policy.processNameAllowlist,
+        processNameAllowlist: managedRules.map((rule) => toExactProcessName(rule.pattern)).filter(Boolean),
+        namespaceDenylist: policyRecord.policy.namespaceDenylist,
       });
       let savedRuleSet = ruleSet;
       if (ruleApiAvailable) {
@@ -382,7 +402,7 @@ export function AutobanPolicyPage() {
           savedRuleSet = await saveProcscanRuleSet(ruleSet);
         }
       }
-      await saveAutobanPolicy(nextPolicy, policyExists);
+      await saveAutobanPolicy(nextPolicy, policyRecord.exists || policyExists);
       setRuleSet(savedRuleSet);
       setInitialRuleSet(savedRuleSet);
       setPolicy(nextPolicy);
@@ -467,20 +487,25 @@ export function AutobanPolicyPage() {
 
       <section className="autoban-policy-bar" aria-label="自动封禁策略">
         <div className="autoban-execution-field">
-          <span className="field-label">执行模式</span>
-          <div className="policy-mode-control" aria-label="执行模式" role="group">
-            <button aria-pressed={executionMode === "off"} className={`policy-mode-button ${executionMode === "off" ? "active" : ""}`} onClick={() => setExecutionMode("off")} type="button">关闭</button>
-            <button aria-pressed={executionMode === "observe"} className={`policy-mode-button ${executionMode === "observe" ? "active" : ""}`} onClick={() => setExecutionMode("observe")} type="button">观察模式</button>
-            <button aria-pressed={executionMode === "execute"} className={`policy-mode-button ${executionMode === "execute" ? "active policy-mode-danger" : ""}`} onClick={() => setExecutionMode("execute")} type="button">自动执行</button>
+          <div className="autoban-mode-copy">
+            <span className="field-label">执行模式</span>
+            <strong className={`autoban-mode-current ${executionMode === "execute" ? "is-danger" : ""}`}>
+              {executionMode === "off" ? "当前：关闭" : executionMode === "observe" ? "当前：观察模式" : "当前：自动执行"}
+            </strong>
+          </div>
+          <div className="policy-mode-control" aria-label="执行模式" role="radiogroup">
+            <button aria-checked={executionMode === "off"} aria-pressed={executionMode === "off"} className={`policy-mode-button ${executionMode === "off" ? "active" : ""}`} onClick={() => setExecutionMode("off")} role="radio" type="button">关闭</button>
+            <button aria-checked={executionMode === "observe"} aria-pressed={executionMode === "observe"} className={`policy-mode-button ${executionMode === "observe" ? "active" : ""}`} onClick={() => setExecutionMode("observe")} role="radio" type="button">观察模式</button>
+            <button aria-checked={executionMode === "execute"} aria-pressed={executionMode === "execute"} className={`policy-mode-button ${executionMode === "execute" ? "active policy-mode-danger" : ""}`} onClick={() => setExecutionMode("execute")} role="radio" type="button">自动执行</button>
           </div>
         </div>
-        <div className="autoban-policy-note">
+        <p className="autoban-policy-note">
           {executionMode === "off"
-            ? "不处理命中事件。"
+            ? "不处理命中事件。改模式后需要点右上角保存。"
             : executionMode === "observe"
-              ? "命中只记录，不执行封禁。先用这一档核对规则。"
-              : "命中后封禁该进程所在的租户 Namespace（仅 ns- 开头）。"}
-        </div>
+              ? "命中只记录，不封禁。这是核对规则时用的档位，改模式后需要保存。"
+              : "命中后会立刻封禁对应租户 Namespace。改模式后需要保存。"}
+        </p>
       </section>
 
       <div className="autoban-workspace">
@@ -560,20 +585,22 @@ export function AutobanPolicyPage() {
           ) : null}
           <div className="autoban-protected">
             <span>排除 Namespace</span>
+            <p className="scope-mode-summary">单独增删，立刻保存。改执行模式或进程规则不会清空这份名单。</p>
             <div className="scope-input-row">
               <Input
-                aria-label="搜索或添加排除 Namespace"
+                aria-label="添加排除 Namespace"
+                disabled={denylistSaving}
                 onChange={(event) => setNamespaceDenylistDraft(event.target.value)}
-                placeholder="搜索或输入 Namespace"
+                placeholder="输入 Namespace 后点加号"
                 value={namespaceDenylistDraft}
               />
-              <button aria-label="添加排除 Namespace" className="icon-btn" disabled={!canAddNamespaceDenylist} onClick={addNamespaceDenylist} type="button"><Plus size={18} /></button>
+              <button aria-label="添加排除 Namespace" className="icon-btn" disabled={denylistSaving || !canAddNamespaceDenylist} onClick={addNamespaceDenylist} type="button"><Plus size={18} /></button>
             </div>
             <div className="tag-list" aria-label="排除 Namespace 列表">
-              {filteredNamespaceDenylist.map((namespace) => (
+              {policy.namespaceDenylist.map((namespace) => (
                 <span className="value-tag value-tag-protected" key={namespace}>
                   {namespace}
-                  <button aria-label={`删除排除项 ${namespace}`} className="tag-remove-button" onClick={() => updatePolicy((current) => ({ ...current, namespaceDenylist: current.namespaceDenylist.filter((item) => item !== namespace) }))} type="button"><Trash2 size={14} /></button>
+                  <button aria-label={`删除排除项 ${namespace}`} className="tag-remove-button" disabled={denylistSaving} onClick={() => removeNamespaceDenylist(namespace)} type="button"><Trash2 size={14} /></button>
                 </span>
               ))}
             </div>
@@ -597,7 +624,7 @@ export function AutobanPolicyPage() {
           </div>
         ) : recentHits.length === 0 ? (
           <div style={{ padding: 20 }}>
-            <EmptyState title="最近 30 天暂无进程命中" description="命中高风险进程后，这里会显示进程名和对应 Namespace。若刚保存规则，可能需要等下一轮扫描。" />
+            <EmptyState title="暂无进程命中" description="命中高风险进程后，这里会显示进程名和对应 Namespace。若刚保存规则，可能需要等下一轮扫描。" />
           </div>
         ) : (
           <div className="autoban-rule-table-wrap" style={{ padding: "0 20px 20px" }}>
@@ -617,7 +644,7 @@ export function AutobanPolicyPage() {
                     <td><strong>{hit.processName ?? "-"}</strong></td>
                     <td>
                       {hit.namespace ? (
-                        <button className="namespace-link table-row-button" onClick={() => navigate(`/namespaces/${hit.namespace}`)} type="button">
+                        <button className="namespace-link table-row-button" onClick={() => navigate(`/namespaces/${encodeURIComponent(hit.namespace)}`)} type="button">
                           {hit.namespace}
                         </button>
                       ) : (
@@ -625,7 +652,7 @@ export function AutobanPolicyPage() {
                       )}
                     </td>
                     <td>{hit.podName ?? "-"}</td>
-                    <td><StatusPill tone={hit.autobanStatus === "submitted" ? "danger" : hit.autobanStatus === "dry_run" ? "warn" : "neutral"}>{getAutobanLabel(hit.autobanStatus)}</StatusPill></td>
+                    <td><StatusPill tone={hit.autobanStatus === "submitted" ? "danger" : hit.autobanStatus === "dry_run" ? "warn" : "neutral"}>{getAutobanLabel(hit.autobanStatus, executionMode)}</StatusPill></td>
                     <td>{hit.detectedAt}</td>
                   </tr>
                 ))}

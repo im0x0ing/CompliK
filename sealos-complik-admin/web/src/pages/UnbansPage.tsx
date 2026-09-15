@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button,
-  ConfirmModal,
   DetailList,
   Drawer,
   EmptyState,
@@ -24,14 +23,13 @@ import type { UnbanRecord } from "../types";
 export function UnbansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { banRecords, configRecords, createUnbanRecord, error, isLoading, refreshAll, unbanRecords, deleteUnbanRecord } = useAppData();
+  const { banRecords, configRecords, createUnbanRecord, error, isLoading, refreshAll, unbanRecords } = useAppData();
   const [selected, setSelected] = useState<UnbanRecord | null>(null);
   const [open, setOpen] = useState(false);
   const [keyword, setKeyword] = useState(() => searchParams.get("namespace") ?? "");
   const [operatorFilter, setOperatorFilter] = useState("");
   const [timeRange, setTimeRange] = useState<ListTimeRange>("all");
   const [page, setPage] = useState(1);
-  const [pendingDelete, setPendingDelete] = useState<UnbanRecord | null>(null);
   const [namespace, setNamespace] = useState("");
   const [operatorName, setOperatorName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -230,11 +228,8 @@ export function UnbansPage() {
               ]}
             />
             <div className="button-row" style={{ marginTop: 20 }}>
-              <Button variant="secondary" onClick={() => navigate(`/namespaces/${selected.namespace}`)}>
+              <Button variant="secondary" onClick={() => navigate(`/namespaces/${encodeURIComponent(selected.namespace)}`)}>
                 查看 namespace 详情
-              </Button>
-              <Button variant="danger" onClick={() => setPendingDelete(selected)}>
-                删除记录
               </Button>
             </div>
           </>
@@ -288,22 +283,6 @@ export function UnbansPage() {
         </div>
       </Modal>
 
-      <ConfirmModal
-        description={pendingDelete ? `删除后仅移除当前这条解封记录（namespace: ${pendingDelete.namespace}，操作人: ${pendingDelete.operatorName}）。` : ""}
-        onClose={() => setPendingDelete(null)}
-        onConfirm={() => {
-          if (!pendingDelete) return;
-            void deleteUnbanRecord(pendingDelete.apiId).then(() => {
-            if (selected?.id === pendingDelete.id) {
-              setSelected(null);
-            }
-            setPendingDelete(null);
-            void refreshAll();
-          });
-        }}
-        open={Boolean(pendingDelete)}
-        title="删除解封记录"
-      />
     </div>
   );
 }

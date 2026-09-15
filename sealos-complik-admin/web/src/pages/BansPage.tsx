@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button,
-  ConfirmModal,
   DetailList,
   Drawer,
   EmptyState,
@@ -27,7 +26,7 @@ import type { BanRecord, PaginatedRecords } from "../types";
 export function BansPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { banRecords, configRecords, createBanRecord, deleteBanRecord, refreshAll, unbanRecords } = useAppData();
+  const { banRecords, configRecords, createBanRecord, refreshAll, unbanRecords } = useAppData();
   const [refreshing, setRefreshing] = useState(false);
   const [selected, setSelected] = useState<BanRecord | null>(null);
   const [open, setOpen] = useState(false);
@@ -43,7 +42,6 @@ export function BansPage() {
   });
   const [listError, setListError] = useState<string | null>(null);
   const [isListLoading, setIsListLoading] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<BanRecord | null>(null);
   const [namespace, setNamespace] = useState("");
   const [reason, setReason] = useState("");
   const [banStartTime, setBanStartTime] = useState("");
@@ -372,11 +370,8 @@ export function BansPage() {
               <Button variant="primary" onClick={() => navigate(unbanCreatePath(selected.namespace))}>
                 解封此租户
               </Button>
-              <Button variant="secondary" onClick={() => navigate(`/namespaces/${selected.namespace}`)}>
+              <Button variant="secondary" onClick={() => navigate(`/namespaces/${encodeURIComponent(selected.namespace)}`)}>
                 查看 namespace 详情
-              </Button>
-              <Button variant="danger" onClick={() => setPendingDelete(selected)}>
-                删除记录
               </Button>
             </div>
           </>
@@ -510,22 +505,6 @@ export function BansPage() {
         ) : null}
       </Modal>
 
-      <ConfirmModal
-        description={pendingDelete ? `删除后将从当前前端列表中移除 namespace ${pendingDelete.namespace} 的封禁记录。` : ""}
-        onClose={() => setPendingDelete(null)}
-        onConfirm={() => {
-          if (!pendingDelete) return;
-          void deleteBanRecord(pendingDelete.apiId).then(() => {
-            if (selected?.id === pendingDelete.id) {
-              setSelected(null);
-            }
-            setPendingDelete(null);
-            void loadRows();
-          });
-        }}
-        open={Boolean(pendingDelete)}
-        title="删除封禁记录"
-      />
     </div>
   );
 }

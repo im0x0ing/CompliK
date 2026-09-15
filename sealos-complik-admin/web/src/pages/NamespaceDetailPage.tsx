@@ -1,9 +1,8 @@
 import { ArrowRight, Search } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createSearchParams, useNavigate, useParams } from "react-router-dom";
 import {
   Button,
-  ConfirmModal,
   DetailList,
   Drawer,
   EmptyState,
@@ -19,26 +18,39 @@ import { buildCommitmentDownloadURL } from "../lib/api";
 import { banCreatePath, unbanCreatePath } from "../lib/tenantActions";
 import { isLockableTenantNamespace } from "../lib/tenantNamespace";
 import { formatURLWithDeviceProfile, formatViolationTypeLabel, paginateItems, summarizeMarkdown } from "../lib/utils";
-import type { ViolationRecord } from "../types";
+import type { NamespaceProfile, ViolationRecord } from "../types";
 
 function toneByBoolean(value: boolean, positiveTone: "success" | "warn" | "danger" = "success") {
   return value ? positiveTone : "neutral";
 }
 
+function emptyNamespaceProfile(namespace: string): NamespaceProfile {
+  return {
+    namespace,
+    violated: false,
+    banned: false,
+    commitmentUploaded: false,
+    lastActionAt: "-",
+    recentViolations: [],
+    timeline: [],
+  };
+}
+
 export function NamespaceDetailPage() {
   const { namespace } = useParams();
   const navigate = useNavigate();
-  const { deleteViolationRecord, error, isLoading, namespaceProfiles, refreshAll, violations } = useAppData();
-  const [keyword, setKeyword] = useState("");
+  const { error, isLoading, namespaceProfiles, refreshAll, violations } = useAppData();
+  const decodedNamespace = namespace?.trim() ? decodeURIComponent(namespace) : "";
+  const [keyword, setKeyword] = useState(decodedNamespace);
   const [violationPage, setViolationPage] = useState(1);
   const [timelinePage, setTimelinePage] = useState(1);
   const [selectedViolation, setSelectedViolation] = useState<ViolationRecord | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<ViolationRecord | null>(null);
 
-  const profile = useMemo(
-    () => (namespace ? namespaceProfiles.find((item) => item.namespace === namespace) ?? null : null),
-    [namespace, namespaceProfiles],
+  const existingProfile = useMemo(
+    () => (decodedNamespace ? namespaceProfiles.find((item) => item.namespace === decodedNamespace) ?? null : null),
+    [decodedNamespace, namespaceProfiles],
   );
+  const profile = existingProfile ?? (decodedNamespace && !isLoading ? emptyNamespaceProfile(decodedNamespace) : null);
   const recentViolations = useMemo(
     () => (profile ? violations.filter((item) => item.namespace === profile.namespace) : []),
     [profile, violations],
@@ -47,53 +59,79 @@ export function NamespaceDetailPage() {
   const paginatedTimeline = useMemo(() => paginateItems(profile?.timeline ?? [], timelinePage), [profile?.timeline, timelinePage]);
 
   useEffect(() => {
+    setKeyword(decodedNamespace);
     setViolationPage(1);
     setTimelinePage(1);
-  }, [profile?.namespace]);
+  }, [decodedNamespace]);
 
-  if (!profile) {
-    const canNavigate = keyword.trim().length > 0;
+  function openNamespace(nextNamespace: string) {
+    const trimmed = nextNamespace.trim();
+    if (!trimmed) return;
+    navigate(`/namespaces/${encodeURIComponent(trimmed)}`);
+  }
 
+  function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    openNamespace(keyword);
+  }
+
+  const searchField = (
+    <form className="toolbar" onSubmit={handleSearchSubmit}>
+      <div style={{ display: "flex", gap: 12, width: "100%" }}>
+        <Input
+          value={keyword}
+          onChange={(event) => setKeyword(event.target.value)}
+          placeholder="输入 namespace，例如 ns-user-abc"
+        />
+        <Button disabled={!keyword.trim()} variant="secondary" type="submit">
+          <Search size={16} /> 查看详情
+        </Button>
+      </div>
+    </form>
+  );
+
+  if (!decodedNamespace) {
     return (
       <div className="page-container">
         <PageHeader
           kicker="Namespace"
-          title={namespace ?? "命名空间详情"}
-          description="输入 namespace 后查看违规记录、封禁、承诺书和处置时间线。"
+          title="命名空间详情"
+          description="输入 namespace 后，会进入和从封禁记录点进去相同的详情页。"
           actions={
-            <Button
-              variant="secondary"
-              onClick={() => {
-                void refreshAll();
-              }}
-            >
+            <Button variant="secondary" onClick={() => void refreshAll()}>
+              重试加载
+            </Button>
+          }
+        />
+        <SurfaceCard>
+          <div className="field">
+            <span className="field-label">namespace</span>
+            {searchField}
+          </div>
+        </SurfaceCard>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="page-container">
+        <PageHeader
+          kicker="Namespace"
+          title={decodedNamespace}
+          description="正在读取这个 namespace 的封禁、违规和承诺书记录。"
+          actions={
+            <Button variant="secondary" onClick={() => void refreshAll()}>
               重试加载
             </Button>
           }
         />
         <SurfaceCard>
           <EmptyState
-            title={isLoading ? "命名空间数据加载中" : namespace ? "未找到命名空间数据" : "请选择命名空间"}
-            description={error ?? (namespace ? "当前 namespace 没有可展示记录，请检查数据是否已同步。" : "直接点击命名空间详情时先停留在查询入口。")}
+            title="命名空间数据加载中"
+            description={error ?? "加载完成后会展示和封禁记录入口相同的详情。"}
           />
-          <div className="toolbar" style={{ marginTop: 20 }}>
-            <label className="field">
-              <span className="field-label">namespace</span>
-              <div style={{ display: "flex", gap: 12 }}>
-                <Input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入 namespace" />
-                <Button
-                  disabled={!canNavigate}
-                  variant="secondary"
-                  onClick={() => {
-                    if (!canNavigate) return;
-                    navigate(`/namespaces/${keyword.trim()}`);
-                  }}
-                >
-                  <Search size={16} /> 查看详情
-                </Button>
-              </div>
-            </label>
-          </div>
+          {searchField}
         </SurfaceCard>
       </div>
     );
@@ -163,15 +201,10 @@ export function NamespaceDetailPage() {
           </div>
         </div>
         <div className="toolbar">
-          <label className="field">
+          <div className="field">
             <span className="field-label">查看其他 namespace</span>
-            <div style={{ display: "flex", gap: 12 }}>
-              <Input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="输入 namespace" />
-              <Button variant="secondary" onClick={() => navigate(`/namespaces/${keyword || profile.namespace}`)}>
-                <Search size={16} /> 查看详情
-              </Button>
-            </div>
-          </label>
+            {searchField}
+          </div>
         </div>
       </SurfaceCard>
 
@@ -354,32 +387,10 @@ export function NamespaceDetailPage() {
               <Button variant="secondary" onClick={() => navigate("/violations")}>
                 去违规中心
               </Button>
-              <Button variant="danger" onClick={() => setPendingDelete(selectedViolation)}>
-                删除记录
-              </Button>
             </div>
           </>
         ) : null}
       </Drawer>
-
-      <ConfirmModal
-        description={pendingDelete ? `删除后仅移除当前这条违规记录（namespace: ${pendingDelete.namespace}）。` : ""}
-        onClose={() => setPendingDelete(null)}
-        onConfirm={() => {
-          if (!pendingDelete) return;
-          void deleteViolationRecord({
-            id: pendingDelete.apiId,
-            type: pendingDelete.type,
-          }).then(() => {
-            if (selectedViolation?.id === pendingDelete.id) {
-              setSelectedViolation(null);
-            }
-            setPendingDelete(null);
-          });
-        }}
-        open={Boolean(pendingDelete)}
-        title="删除违规记录"
-      />
     </div>
   );
 }

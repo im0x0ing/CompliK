@@ -4,7 +4,6 @@ import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Button,
-  ConfirmModal,
   DetailList,
   Drawer,
   EmptyState,
@@ -16,7 +15,7 @@ import {
   SurfaceCard,
 } from "../components/ui";
 import { MarkdownRenderer } from "../components/MarkdownRenderer";
-import { deleteViolationRecord as apiDeleteViolationRecord, listViolationRecordsPage } from "../lib/api";
+import { listViolationRecordsPage } from "../lib/api";
 import { banCreatePath } from "../lib/tenantActions";
 import { isLockableTenantNamespace } from "../lib/tenantNamespace";
 import { formatURLWithDeviceProfile, formatViolationTypeLabel } from "../lib/utils";
@@ -26,7 +25,7 @@ export function ViolationsPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<ViolationType>("complik");
   const [scope, setScope] = useState<ViolationScope>("violations");
-  const [timeRange, setTimeRange] = useState<ViolationTimeRange>("7d");
+  const [timeRange, setTimeRange] = useState<ViolationTimeRange>("all");
   const [page, setPage] = useState(1);
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -40,7 +39,6 @@ export function ViolationsPage() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selected, setSelected] = useState<ViolationRecord | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<ViolationRecord | null>(null);
   const requestSequence = useRef(0);
 
   const rows = data.list;
@@ -137,10 +135,10 @@ export function ViolationsPage() {
                 resetPage(() => setTimeRange(event.target.value as ViolationTimeRange));
               }}
             >
+              <option value="all">全部时间</option>
               <option value="24h">最近 24 小时</option>
               <option value="7d">最近 7 天</option>
               <option value="30d">最近 30 天</option>
-              <option value="all">全部时间</option>
             </Select>
           </Field>
           <Field label="搜索">
@@ -315,30 +313,10 @@ export function ViolationsPage() {
                   封禁此租户
                 </Button>
               ) : null}
-              <Button variant="danger" onClick={() => setPendingDelete(selected)}>
-                删除记录
-              </Button>
             </div>
           </>
         ) : null}
       </Drawer>
-
-      <ConfirmModal
-        description={pendingDelete ? `删除后仅移除当前这条违规记录（namespace: ${pendingDelete.namespace}）。` : ""}
-        onClose={() => setPendingDelete(null)}
-        onConfirm={() => {
-          if (!pendingDelete) return;
-          void apiDeleteViolationRecord(pendingDelete.apiId, pendingDelete.type).then(() => {
-            if (selected?.id === pendingDelete.id) {
-              setSelected(null);
-            }
-            setPendingDelete(null);
-            void loadViolations();
-          });
-        }}
-        open={Boolean(pendingDelete)}
-        title="删除违规记录"
-      />
     </div>
   );
 }
