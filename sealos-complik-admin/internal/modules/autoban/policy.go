@@ -17,7 +17,7 @@ const (
 	defaultReasonPrefix = "Admin auto-ban"
 )
 
-var defaultNamespaceDenylist []string
+var defaultNamespaceDenylist = append([]string(nil), k8s.ProtectedNamespaces...)
 
 type Policy struct {
 	Enabled              bool
@@ -278,18 +278,34 @@ func (p Policy) allowsNamespace(namespace string) bool {
 func (p Policy) allowsProcessName(processName string) bool {
 	trimmedProcessName := strings.TrimSpace(processName)
 	if trimmedProcessName == "" {
-		return true
-	}
-
-	if slices.Contains(p.ProcessNameDenylist, trimmedProcessName) {
 		return false
 	}
 
-	if len(p.ProcessNameAllowlist) == 0 {
-		return true
+	if containsProcessName(p.ProcessNameDenylist, trimmedProcessName) {
+		return false
 	}
 
-	return slices.Contains(p.ProcessNameAllowlist, trimmedProcessName)
+	return containsProcessName(p.ProcessNameAllowlist, trimmedProcessName)
+}
+
+func containsProcessName(names []string, processName string) bool {
+	for _, name := range names {
+		if strings.EqualFold(exactProcessName(name), processName) {
+			return true
+		}
+	}
+	return false
+}
+
+func exactProcessName(value string) string {
+	trimmed := strings.TrimSpace(value)
+	const prefix = "(?i)^"
+	const suffix = "$"
+	if strings.HasPrefix(trimmed, prefix) && strings.HasSuffix(trimmed, suffix) &&
+		len(trimmed) > len(prefix)+len(suffix) {
+		return trimmed[len(prefix) : len(trimmed)-len(suffix)]
+	}
+	return trimmed
 }
 
 func (p Policy) allowsSource(source Source) bool {

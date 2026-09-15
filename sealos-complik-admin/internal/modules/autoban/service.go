@@ -69,8 +69,7 @@ func (s *Service) HandleViolationDecision(
 		return DecisionResult{Status: DecisionNotTriggered, Reason: "policy_scope_rejected"}, nil
 	}
 
-	if processName := strings.TrimSpace(violation.ProcessName); !violation.RuleValidated && processName != "" &&
-		!policy.allowsProcessName(processName) {
+	if !policy.allowsProcessName(violation.ProcessName) {
 		return DecisionResult{Status: DecisionNotTriggered, Reason: "process_policy_rejected"}, nil
 	}
 

@@ -68,7 +68,8 @@ func TestHandleViolationCreatesBan(t *testing.T) {
 		"operatorName": "system/autoban",
 		"sources": {
 			"procscan": { "enabled": true }
-		}
+		},
+		"processNameAllowlist": ["xmrig"]
 	}`), fake)
 	fixed := time.Date(2026, time.July, 29, 8, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return fixed }
@@ -76,6 +77,7 @@ func TestHandleViolationCreatesBan(t *testing.T) {
 	err := svc.HandleViolation(context.Background(), Violation{
 		Namespace:    "  ns-demo  ",
 		Source:       SourceProcscan,
+		ProcessName:  "xmrig",
 		DetectorName: "miner-rule",
 		Summary:      "suspicious command",
 		Detail:       "process_command=xmrig --url ...",
@@ -110,7 +112,7 @@ func TestHandleViolationCreatesBan(t *testing.T) {
 	}
 }
 
-func TestHandleViolationCreatesBanForComplik(t *testing.T) {
+func TestHandleViolationDoesNotBanComplikContent(t *testing.T) {
 	fake := &fakeBanService{}
 	svc := NewService(policyRepo(`{
 		"enabled": true,
@@ -118,7 +120,8 @@ func TestHandleViolationCreatesBanForComplik(t *testing.T) {
 		"operatorName": "system/autoban",
 		"sources": {
 			"complik": { "enabled": true }
-		}
+		},
+		"processNameAllowlist": ["xmrig"]
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
@@ -132,16 +135,8 @@ func TestHandleViolationCreatesBanForComplik(t *testing.T) {
 		t.Fatalf("HandleViolation returned error: %v", err)
 	}
 
-	if len(fake.createReqs) != 1 {
-		t.Fatalf("expected 1 ban request, got %d", len(fake.createReqs))
-	}
-
-	if fake.createReqs[0].Namespace != "ns-demo" {
-		t.Fatalf("unexpected namespace: %q", fake.createReqs[0].Namespace)
-	}
-
-	if !strings.Contains(fake.createReqs[0].Reason, "complik") {
-		t.Fatalf("unexpected ban reason: %q", fake.createReqs[0].Reason)
+	if len(fake.createReqs) != 0 {
+		t.Fatalf("content violation was submitted for ban: %+v", fake.createReqs)
 	}
 }
 
@@ -199,6 +194,54 @@ func TestHandleViolationHonorsProcessNamePolicy(t *testing.T) {
 	}
 }
 
+func TestHandleViolationRejectsEmptyProcessAllowlistEvenWhenRuleValidated(t *testing.T) {
+	fake := &fakeBanService{}
+	svc := NewService(policyRepo(`{
+		"enabled": true,
+		"dryRun": false,
+		"sources": { "procscan": { "enabled": true } }
+	}`), fake)
+
+	decision, err := svc.HandleViolationDecision(context.Background(), Violation{
+		Namespace:     "ns-demo",
+		Source:        SourceProcscan,
+		ProcessName:   "xmrig",
+		RuleValidated: true,
+		IsIllegal:     true,
+	})
+	if err != nil {
+		t.Fatalf("HandleViolationDecision returned error: %v", err)
+	}
+	if decision.Status != DecisionNotTriggered || decision.Reason != "process_policy_rejected" {
+		t.Fatalf("unexpected decision: %+v", decision)
+	}
+	if len(fake.createReqs) != 0 {
+		t.Fatalf("empty process allowlist was submitted for ban: %+v", fake.createReqs)
+	}
+}
+
+func TestHandleViolationMatchesWrappedProcessPattern(t *testing.T) {
+	fake := &fakeBanService{}
+	svc := NewService(policyRepo(`{
+		"enabled": true,
+		"dryRun": false,
+		"sources": { "procscan": { "enabled": true } },
+		"processNameAllowlist": ["(?i)^xmrig$"]
+	}`), fake)
+
+	if err := svc.HandleViolation(context.Background(), Violation{
+		Namespace:   "ns-demo",
+		Source:      SourceProcscan,
+		ProcessName: "XMRIG",
+		IsIllegal:   true,
+	}); err != nil {
+		t.Fatalf("HandleViolation returned error: %v", err)
+	}
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("expected 1 ban request, got %d", len(fake.createReqs))
+	}
+}
+
 func TestHandleViolationUsesConservativeDefaultPolicy(t *testing.T) {
 	fake := &fakeBanService{}
 	svc := NewService(nil, fake)
@@ -226,7 +269,8 @@ func TestHandleViolationReportsUnavailableBanServiceAsFailure(t *testing.T) {
 	svc := NewService(policyRepo(`{
 		"enabled": true,
 		"dryRun": false,
-		"sources": { "procscan": { "enabled": true } }
+		"sources": { "procscan": { "enabled": true } },
+		"processNameAllowlist": ["xmrig"]
 	}`), nil)
 
 	decision, err := svc.HandleViolationDecision(context.Background(), Violation{
@@ -293,18 +337,24 @@ func TestHandleViolationSkipsDryRunPolicy(t *testing.T) {
 		"enabled": true,
 		"dryRun": true,
 		"sources": {
-			"complik": { "enabled": true }
-		}
+			"procscan": { "enabled": true }
+		},
+		"processNameAllowlist": ["xmrig"]
 	}`), fake)
 
-	err := svc.HandleViolation(context.Background(), Violation{
+	decision, err := svc.HandleViolationDecision(context.Background(), Violation{
 		Namespace:    "ns-demo",
-		Source:       SourceComplik,
+		Source:       SourceProcscan,
+		ProcessName:  "xmrig",
 		DetectorName: "detector",
 		IsIllegal:    true,
 	})
 	if err != nil {
-		t.Fatalf("HandleViolation returned error: %v", err)
+		t.Fatalf("HandleViolationDecision returned error: %v", err)
+	}
+
+	if decision.Status != DecisionDryRun || decision.Reason != "policy_dry_run" {
+		t.Fatalf("unexpected dry-run decision: %+v", decision)
 	}
 
 	if len(fake.statusNamespaces) != 1 {
@@ -322,13 +372,15 @@ func TestHandleViolationSkipsWhenAlreadyBanned(t *testing.T) {
 		"enabled": true,
 		"dry_run": false,
 		"sources": {
-			"complik": true
-		}
+			"procscan": { "enabled": true }
+		},
+		"processNameAllowlist": ["xmrig"]
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
 		Namespace:    "ns-demo",
-		Source:       SourceComplik,
+		Source:       SourceProcscan,
+		ProcessName:  "xmrig",
 		DetectorName: "detector",
 		IsIllegal:    true,
 	})
@@ -401,15 +453,17 @@ func TestHandleViolationHonorsNamespacePolicy(t *testing.T) {
 		"sources": {
 			"procscan": { "enabled": true }
 		},
+		"processNameAllowlist": ["xmrig"],
 		"namespaceAllowlist": ["ns-allowed"],
 		"namespaceDenylist": ["ns-denied"]
 	}`), fake)
 
 	for _, namespace := range []string{"ns-denied", "ns-other"} {
 		err := svc.HandleViolation(context.Background(), Violation{
-			Namespace: namespace,
-			Source:    SourceProcscan,
-			IsIllegal: true,
+			Namespace:   namespace,
+			Source:      SourceProcscan,
+			ProcessName: "xmrig",
+			IsIllegal:   true,
 		})
 		if err != nil {
 			t.Fatalf("HandleViolation returned error for %s: %v", namespace, err)
@@ -417,9 +471,10 @@ func TestHandleViolationHonorsNamespacePolicy(t *testing.T) {
 	}
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace: "ns-allowed",
-		Source:    SourceProcscan,
-		IsIllegal: true,
+		Namespace:   "ns-allowed",
+		Source:      SourceProcscan,
+		ProcessName: "xmrig",
+		IsIllegal:   true,
 	})
 	if err != nil {
 		t.Fatalf("HandleViolation returned error: %v", err)
@@ -442,13 +497,15 @@ func TestHandleViolationReturnsExecutorError(t *testing.T) {
 		"dryRun": false,
 		"sources": {
 			"procscan": { "enabled": true }
-		}
+		},
+		"processNameAllowlist": ["xmrig"]
 	}`), fake)
 
 	err := svc.HandleViolation(context.Background(), Violation{
-		Namespace: "ns-demo",
-		Source:    SourceProcscan,
-		IsIllegal: true,
+		Namespace:   "ns-demo",
+		Source:      SourceProcscan,
+		ProcessName: "xmrig",
+		IsIllegal:   true,
 	})
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected executor error %v, got %v", expectedErr, err)
